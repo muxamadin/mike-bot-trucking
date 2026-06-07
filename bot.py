@@ -15,6 +15,32 @@ from telegram.ext import (
 )
 
 try:
+    from supabase import create_client as _sb_create
+    _SB_URL = os.environ.get("SUPABASE_URL", "https://zjgzjfzpvmyltncehsee.supabase.co")
+    _SB_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpqZ3pqZnpwdm15bHRuY2Voc2VlIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4MDc4MTc4MCwiZXhwIjoyMDk2MzU3NzgwfQ.vVIPm7Ew97Cuz0Y4-ekZ5Aned8EeQ2xCPFnlAG4LQcs")
+    sb = _sb_create(_SB_URL, _SB_KEY)
+    SUPABASE_OK = True
+except Exception as _e:
+    sb = None
+    SUPABASE_OK = False
+
+async def sb_insert(table: str, row: dict):
+    if not SUPABASE_OK or sb is None:
+        return
+    try:
+        sb.table(table).insert(row).execute()
+    except Exception as e:
+        logger.warning(f"Supabase insert {table} failed: {e}")
+
+async def sb_upsert(table: str, row: dict, on_conflict: str = "id"):
+    if not SUPABASE_OK or sb is None:
+        return
+    try:
+        sb.table(table).upsert(row).execute()
+    except Exception as e:
+        logger.warning(f"Supabase upsert {table} failed: {e}")
+
+try:
     import gspread
     from google.oauth2.service_account import Credentials
     GSPREAD_AVAILABLE = True
@@ -823,6 +849,17 @@ async def check_weigh_stations_all(bot) -> dict:
             logger.warning(f"Weigh station check failed for {state}: {e}")
 
     save_weigh_status(weigh_status_cache)
+    # Sync to Supabase
+    for state, stations in weigh_status_cache.items():
+        for s in stations:
+            await sb_upsert("weigh_stations", {
+                "state": state,
+                "name": s.get("name", ""),
+                "status": s.get("status", "UNKNOWN"),
+                "direction": s.get("direction", ""),
+                "highway": s.get("highway", ""),
+                "notes": s.get("notes", ""),
+            })
     return changes
 
 
@@ -926,6 +963,15 @@ async def add_driver(name: str, phone: str, truck: str,
         "loads_this_week": 0,
     }
     save_drivers(driver_registry)
+    await sb_insert("drivers", {
+        "name": name,
+        "phone": formatted,
+        "truck_number": truck,
+        "rate_type": rate_type,
+        "rate": rate,
+        "joined_at": time.strftime("%Y-%m-%d"),
+        "status": "active",
+    })
 
     # Get bot username for the Telegram link
     try:
@@ -2008,9 +2054,23 @@ async def learn_from_web(topic: str) -> str:
 async def save_lead_to_sheet(
     name: str, phone: str,
     experience: str = "", solo_team: str = "",
-    status: str = "New Lead", notes: str = ""
+    status: str = "New Lead", notes: str = "",
+    source: str = "", location: str = ""
 ) -> bool:
-    """Send one lead row to Google Sheets via Apps Script webhook."""
+    """Send one lead row to Google Sheets and Supabase."""
+    # Save to Supabase
+    await sb_insert("leads", {
+        "name": name,
+        "phone": phone,
+        "experience": experience,
+        "solo_team": solo_team,
+        "status": status,
+        "notes": notes,
+        "source": source,
+        "location": location,
+        "called": False,
+    })
+    # Also save to Google Sheets
     try:
         payload = {
             "date": time.strftime("%Y-%m-%d %H:%M"),
@@ -3838,6 +3898,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if any(w in t for w in ("breakdown", "broke down", "truck broke", "not starting", "wont start", "dead truck")):
             details = text.strip()
             await log_checkin(driver, "BREAKDOWN", details, context.bot, OWNER_ID)
+            await sb_insert("breakdowns", {
+                "driver_name": driver["name"],
+                "truck_number": driver.get("truck", ""),
+                "description": details,
+                "status": "open",
+            })
             await update.message.reply_text(
                 f"🔴 Got you {first} — alerting dispatch RIGHT NOW.\n\n"
                 f"While you wait:\n"
@@ -3871,6 +3937,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             }
             hometime_requests.append(req)
             save_hometime(hometime_requests)
+            await sb_insert("home_time_requests", {
+                "driver_name": driver["name"],
+                "dates": dates,
+                "status": "pending",
+            })
             await update.message.reply_text(
                 f"🏠 Home time request sent {first}! Manager will confirm within 24 hours."
             )
