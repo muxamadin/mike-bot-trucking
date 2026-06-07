@@ -1192,7 +1192,7 @@ async def monitor_call_and_notify(call_id: str, manager_id: int, driver_name: st
                 else:
                     call_status = "Called"
 
-            # Save to Google Sheet
+            # Save to Google Sheet + Supabase calls table + mark lead as called
             short_notes = summary[:300] if summary else "Voicemail — no answer"
             asyncio.create_task(save_lead_to_sheet(
                 name=driver_name or "Unknown",
@@ -1202,6 +1202,21 @@ async def monitor_call_and_notify(call_id: str, manager_id: int, driver_name: st
                 status=call_status,
                 notes=short_notes,
             ))
+            # Write call record to Supabase
+            await sb_insert("calls", {
+                "driver_name": driver_name or "Unknown",
+                "phone": phone,
+                "interest_level": call_status,
+                "summary": short_notes,
+                "call_id": call_id,
+                "is_voicemail": is_voicemail,
+            })
+            # Mark the lead as called in Supabase
+            if SUPABASE_OK and sb:
+                try:
+                    sb.table("leads").update({"called": True, "status": call_status}).eq("phone", phone).execute()
+                except Exception as e:
+                    logger.warning(f"Supabase lead update failed: {e}")
 
             # Send SMS — offer text for voicemail, CDL request for answered calls
             sms_sent = await send_sms_to_driver(phone, driver_name, voicemail=is_voicemail)
@@ -1228,6 +1243,14 @@ async def monitor_call_and_notify(call_id: str, manager_id: int, driver_name: st
         name=driver_name or "Unknown", phone=phone,
         status="Timeout", notes="Call monitor timed out — SMS sent",
     ))
+    await sb_insert("calls", {
+        "driver_name": driver_name or "Unknown",
+        "phone": phone,
+        "interest_level": "Timeout",
+        "summary": "Call monitor timed out — SMS sent",
+        "call_id": call_id,
+        "is_voicemail": True,
+    })
     if sms_sent:
         await bot.send_message(manager_id, f"📱 Offer SMS sent to {phone}.")
 
