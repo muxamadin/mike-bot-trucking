@@ -5,6 +5,7 @@ import re
 import asyncio
 import time
 import httpx
+from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
 from anthropic import Anthropic
@@ -1180,15 +1181,18 @@ async def monitor_call_and_notify(call_id: str, manager_id: int, driver_name: st
                     solo_team = "Team"
                 elif re.search(r'\bsolo\b', summary, re.IGNORECASE):
                     solo_team = "Solo"
-                # Determine interest status
-                if re.search(r'HOT|🔥', summary):
+                # Determine interest status from Claude summary
+                interest_line = ""
+                for line in summary.splitlines():
+                    if "interest" in line.lower() or "🔥" in line or "🌡" in line or "❄" in line:
+                        interest_line = line
+                        break
+                if re.search(r'HOT|🔥', interest_line or summary, re.IGNORECASE):
                     call_status = "Hot Lead 🔥"
-                elif re.search(r'WARM|🌡', summary):
+                elif re.search(r'WARM|🌡', interest_line or summary, re.IGNORECASE):
                     call_status = "Warm Lead 🌡️"
-                elif re.search(r'COLD|❄', summary):
-                    call_status = "Cold ❄️"
-                elif re.search(r'not interested|no interest', summary, re.IGNORECASE):
-                    call_status = "Not Interested"
+                elif re.search(r'COLD|❄|not interested|no interest', interest_line or summary, re.IGNORECASE):
+                    call_status = "Not Interested ❄️"
                 else:
                     call_status = "Called"
 
@@ -4185,39 +4189,75 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ── Manager dashboard: "status" ───────────────────────────────────────
-        if text.strip().lower() in ("status", "dashboard", "report"):
-            pending   = [l for l in lead_queue if not l.get("called")]
-            called    = [l for l in lead_queue if l.get("called")]
-            hot       = [l for l in lead_queue if "Hot" in l.get("status", "")]
-            warm      = [l for l in lead_queue if "Warm" in l.get("status", "")]
-            onboarding= list(onboarding_pipeline.values())
-            followups = [f for f in followup_queue if f.get("attempted", 0) < 2]
+        if text.strip().lower() in ("status", "dashboard", "report", "results", "stats", "numbers"):
+            await update.message.reply_text("📊 Pulling live call data from Bland.ai...")
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    resp = await client.get(
+                        "https://api.bland.ai/v1/calls?page_size=500",
+                        headers={"authorization": BLAND_API_KEY}
+                    )
+                bland_calls = resp.json().get("calls", [])
+            except Exception:
+                bland_calls = []
 
-            # Build onboarding section
-            ob_lines = ""
-            for d in onboarding[:5]:
-                step = d.get("step", 0)
-                step_name = ONBOARD_STEPS[step] if step < len(ONBOARD_STEPS) else "Complete ✅"
-                ob_lines += f"  • {d['name']} — Step {step+1}: {step_name}\n"
+            now_ts = time.time()
+            today_ts = now_ts - 86400  # last 24 hours
+
+            today_calls = [c for c in bland_calls if c.get("created_at") and
+                           (now_ts - datetime.fromisoformat(c["created_at"].replace("Z", "+00:00")).timestamp()) < 86400]
+
+            total       = len(today_calls)
+            answered    = [c for c in today_calls if c.get("completed") and c.get("answered_by") != "voicemail" and (c.get("call_length") or 0) > 0.3]
+            voicemails  = [c for c in today_calls if c.get("completed") and ((c.get("answered_by") == "voicemail") or (c.get("call_length") or 0) <= 0.3)]
+            live_now    = [c for c in bland_calls if (c.get("status") or "").lower() in ("in-progress", "ringing")]
+
+            # Classify by summary
+            hot, warm, cold, neutral = [], [], [], []
+            for c in answered:
+                s = (c.get("summary") or "").lower()
+                if any(w in s for w in ["hot", "very interested", "ready", "yes", "sign", "start"]):
+                    hot.append(c)
+                elif any(w in s for w in ["warm", "interested", "maybe", "consider", "follow"]):
+                    warm.append(c)
+                elif any(w in s for w in ["not interested", "cold", "happy", "no thanks", "too high"]):
+                    cold.append(c)
+                else:
+                    neutral.append(c)
+
+            # Hot lead names
+            hot_lines = ""
+            for c in hot[:8]:
+                v = c.get("variables") or {}
+                name = v.get("name") or c.get("to", "Unknown")
+                phone = c.get("to", "")
+                hot_lines += f"  🔥 {name} — {phone}\n"
+
+            pending_queue = len([l for l in lead_queue if not l.get("called")])
+            onboarding = list(onboarding_pipeline.values())
+            followups  = [f for f in followup_queue if f.get("attempted", 0) < 2]
 
             msg = (
-                f"📊 *Mike HR Dashboard*\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n\n"
-                f"📋 *Leads*\n"
-                f"  ⏳ Waiting to call: {len(pending)}\n"
-                f"  ✅ Called: {len(called)}\n"
-                f"  🔥 Hot leads: {len(hot)}\n"
-                f"  🌡️ Warm leads: {len(warm)}\n\n"
-                f"🚛 *Onboarding* ({len(onboarding)} drivers)\n"
-                f"{ob_lines or '  None yet'}\n"
+                f"📊 *Mike's Real Results — Last 24h*\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+                f"📞 *Calls Made:* {total}\n"
+                f"  ✅ Answered: {len(answered)}\n"
+                f"  📩 Voicemail: {len(voicemails)}\n"
+                f"  🔴 Live now: {len(live_now)}\n\n"
+                f"🎯 *Driver Results:*\n"
+                f"  🔥 HOT — Ready to hire: {len(hot)}\n"
+                f"  🌡️ WARM — Follow up: {len(warm)}\n"
+                f"  ❄️ NOT Interested: {len(cold)}\n"
+                f"  📋 Neutral/Unclear: {len(neutral)}\n\n"
+            )
+            if hot_lines:
+                msg += f"🔥 *Hot Leads:*\n{hot_lines}\n"
+            msg += (
+                f"⏳ *Queue waiting to call:* {pending_queue}\n"
+                f"🚛 *Onboarding:* {len(onboarding)} drivers\n"
                 f"⏰ *Follow-ups pending:* {len(followups)}\n\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"Commands:\n"
-                f"• `hunt now` — find 100 new leads\n"
-                f"• `call queue: N` — call N drivers\n"
-                f"• `onboard: [phone]` — start onboarding\n"
-                f"• `step: [phone]` — advance to next step\n"
-                f"• `followups` — see follow-up list\n"
+                f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"Commands: `hunt now` | `call queue: N` | `followups`"
             )
             await update.message.reply_text(msg, parse_mode="Markdown")
             return
