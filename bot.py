@@ -3542,7 +3542,7 @@ async def ask_claude_manager(user_id: int, question: str) -> str:
         conversation_history[uid].append({"role": "user", "content": content})
         conversation_history[uid] = conversation_history[uid][-20:]
         response = claude.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5",
             max_tokens=800,
             system=MANAGER_SYSTEM_PROMPT,
             messages=conversation_history[uid],
@@ -3575,7 +3575,7 @@ async def ask_claude(user_id: int, question: str) -> str:
         conversation_history[uid] = conversation_history[uid][-20:]
 
         response = claude.messages.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-4-5",
             max_tokens=300,
             system=system,
             messages=conversation_history[uid],
