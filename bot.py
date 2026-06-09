@@ -8,7 +8,16 @@ import httpx
 from datetime import datetime, timezone
 from pathlib import Path
 from dotenv import load_dotenv
-from anthropic import Anthropic
+try:
+    from groq import Groq as GroqClient
+    GROQ_AVAILABLE = True
+except ImportError:
+    GROQ_AVAILABLE = False
+try:
+    from anthropic import Anthropic
+    ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -475,12 +484,7 @@ Transcript:
 
 Be SHORT. Only include what was actually said. Skip sections with no info."""
 
-        response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=400,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        return response.content[0].text
+        return _ai_complete("You are a call summarizer.", [{"role": "user", "content": prompt}], max_tokens=400, model_hint="fast")
     except Exception as e:
         return f"Could not summarize: {e}"
 
@@ -1379,9 +1383,45 @@ logger = logging.getLogger(__name__)
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
 OWNER_ID = int(os.getenv("OWNER_TELEGRAM_ID", "0"))
 
-claude = Anthropic(api_key=ANTHROPIC_API_KEY)
+# Use Groq if available and key set, else fall back to Anthropic
+if GROQ_AVAILABLE and GROQ_API_KEY:
+    _groq_client = GroqClient(api_key=GROQ_API_KEY)
+    _USE_GROQ = True
+    logger.info("Using Groq AI (free)")
+else:
+    _USE_GROQ = False
+    logger.info("Using Anthropic Claude")
+
+if ANTHROPIC_AVAILABLE and ANTHROPIC_API_KEY:
+    claude = Anthropic(api_key=ANTHROPIC_API_KEY)
+else:
+    claude = None
+
+def _ai_complete(system: str, messages: list, max_tokens: int = 400, model_hint: str = "smart") -> str:
+    """Unified AI call — uses Groq if available, else Anthropic."""
+    if _USE_GROQ:
+        # Map model hints to Groq models
+        model = "llama-3.3-70b-versatile" if model_hint == "smart" else "llama-3.1-8b-instant"
+        resp = _groq_client.chat.completions.create(
+            model=model,
+            max_tokens=max_tokens,
+            messages=[{"role": "system", "content": system}] + messages,
+        )
+        return resp.choices[0].message.content
+    elif claude:
+        model = "claude-sonnet-4-5" if model_hint == "smart" else "claude-haiku-4-5-20251001"
+        resp = claude.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+        )
+        return resp.content[0].text
+    else:
+        raise Exception("No AI provider configured. Set GROQ_API_KEY or ANTHROPIC_API_KEY.")
 
 MANAGER_PASSWORD = "Mike223344"
 
@@ -3130,12 +3170,8 @@ Return a JSON list of short fact strings. Max 2 facts. If nothing general worth 
 User: {user_msg[:300]}
 Mike: {mike_reply[:300]}"""
 
-        response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=200,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        raw = response.content[0].text.strip()
+        raw = _ai_complete("You extract facts.", [{"role": "user", "content": prompt}], max_tokens=200, model_hint="fast")
+        raw = raw.strip()
         match = re.search(r'\[.*\]', raw, re.DOTALL)
         if match:
             facts = json.loads(match.group())
@@ -3198,12 +3234,8 @@ Search results: {result[:800]}
 Return a JSON list of short insight strings that Mike can actually USE in conversations. Focus on: driver emotions, what works, what doesn't. Example: ["Drivers who say they're happy often mean they're not actively looking — ask what would make them move", "Cold-called drivers feel interrupted — open with 'is this a bad time?' to show respect"]
 
 Return ONLY the JSON list."""
-                response = claude.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=300,
-                    messages=[{"role": "user", "content": prompt}]
-                )
-                raw = response.content[0].text.strip()
+                raw = _ai_complete("You extract insights.", [{"role": "user", "content": prompt}], max_tokens=300, model_hint="fast")
+                raw = raw.strip()
                 match = re.search(r'\[.*\]', raw, re.DOTALL)
                 if match:
                     facts = json.loads(match.group())
@@ -3262,13 +3294,8 @@ async def extract_and_save_memory(user_id: int, user_msg: str, mike_reply: str):
             current_facts=json.dumps(current_facts)
         )
 
-        response = claude.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        raw = response.content[0].text.strip()
+        raw = _ai_complete("You extract memory facts.", [{"role": "user", "content": prompt}], max_tokens=300, model_hint="fast")
+        raw = raw.strip()
         # Extract JSON from response
         json_match = re.search(r'\{.*\}', raw, re.DOTALL)
         if json_match:
@@ -3541,18 +3568,12 @@ async def ask_claude_manager(user_id: int, question: str) -> str:
 
         conversation_history[uid].append({"role": "user", "content": content})
         conversation_history[uid] = conversation_history[uid][-20:]
-        response = claude.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=800,
-            system=MANAGER_SYSTEM_PROMPT,
-            messages=conversation_history[uid],
-        )
-        reply = response.content[0].text
+        reply = _ai_complete(MANAGER_SYSTEM_PROMPT, conversation_history[uid], max_tokens=800, model_hint="smart")
         conversation_history[uid].append({"role": "assistant", "content": reply})
         save_history(conversation_history)
         return reply
     except Exception as e:
-        logger.error(f"Claude manager error: {e}")
+        logger.error(f"AI manager error: {e}")
         return "Something went wrong on my end, try again."
 
 
@@ -3574,13 +3595,7 @@ async def ask_claude(user_id: int, question: str) -> str:
         conversation_history[uid].append({"role": "user", "content": question})
         conversation_history[uid] = conversation_history[uid][-20:]
 
-        response = claude.messages.create(
-            model="claude-sonnet-4-5",
-            max_tokens=300,
-            system=system,
-            messages=conversation_history[uid],
-        )
-        reply = response.content[0].text
+        reply = _ai_complete(system, conversation_history[uid], max_tokens=300, model_hint="smart")
 
         # Security: block reply if it somehow contains sensitive data
         if contains_sensitive(reply):
