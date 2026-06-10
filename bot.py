@@ -801,19 +801,13 @@ async def fetch_weigh_status_for_state(state: str) -> list[dict]:
     if not combined.strip():
         return []
 
-    # Ask Claude to extract station statuses
+    # Ask AI to extract station statuses
     try:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
+        raw = await asyncio.get_event_loop().run_in_executor(
             None,
-            lambda: _haiku_client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=500,
-                system=_WEIGH_AGENT_SYSTEM,
-                messages=[{"role": "user", "content": combined}],
-            )
+            lambda: _ai_complete(_WEIGH_AGENT_SYSTEM, [{"role": "user", "content": combined}], max_tokens=500, model_hint="fast")
         )
-        raw = response.content[0].text.strip()
+        raw = raw.strip()
         raw = re.sub(r'^```[a-z]*\n?', '', raw)
         raw = re.sub(r'\n?```$', '', raw)
         results = json.loads(raw)
@@ -2247,8 +2241,7 @@ CRAIGSLIST_CITIES = [
 
 # ── Claude Haiku lead-verification agent ─────────────────────────────────────
 
-_haiku_client = Anthropic()  # reuse existing API key
-_haiku_semaphore = asyncio.Semaphore(3)  # max 3 concurrent Claude calls
+_haiku_semaphore = asyncio.Semaphore(3)  # max 3 concurrent AI calls
 
 _LEAD_AGENT_SYSTEM = """You are a lead-qualification agent for a trucking company that recruits CDL-A drivers.
 
@@ -2292,17 +2285,11 @@ async def claude_verify_lead(text: str, source: str) -> dict | None:
 
     async with _haiku_semaphore:
         try:
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
+            raw = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: _haiku_client.messages.create(
-                    model="claude-haiku-4-5-20251001",
-                    max_tokens=300,
-                    system=_LEAD_AGENT_SYSTEM,
-                    messages=[{"role": "user", "content": f"Source: {source}\n\nText:\n{snippet}"}],
-                )
+                lambda: _ai_complete(_LEAD_AGENT_SYSTEM, [{"role": "user", "content": f"Source: {source}\n\nText:\n{snippet}"}], max_tokens=300, model_hint="fast")
             )
-            raw = response.content[0].text.strip()
+            raw = raw.strip()
             # Strip any markdown fences if present
             raw = re.sub(r'^```[a-z]*\n?', '', raw)
             raw = re.sub(r'\n?```$', '', raw)
