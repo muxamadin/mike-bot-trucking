@@ -4629,7 +4629,7 @@ async def post_init(application):
     asyncio.create_task(periodic_learning_loop())
     asyncio.create_task(daily_lead_loop(bot=application.bot))
     asyncio.create_task(followup_loop(bot=application.bot))
-    asyncio.create_task(weigh_station_loop(bot=application.bot))
+    # asyncio.create_task(weigh_station_loop(bot=application.bot))  # disabled
 
 
 async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
