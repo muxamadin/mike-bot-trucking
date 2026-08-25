@@ -526,10 +526,10 @@ async def make_recruiting_call(phone: str, driver_name: str = "", language: str 
             "record": True,
             "wait_for_greeting": True,
             "amd": True,
-            "temperature": 0.7,
-            "interruption_threshold": 80,
+            "temperature": 0.5,
+            "interruption_threshold": 150,
             "background_track": "none",
-            "endpoint_sensitivity": 0.85,
+            "endpoint_sensitivity": 0.5,
         }
         headers = {"authorization": BLAND_API_KEY, "Content-Type": "application/json"}
         async with httpx.AsyncClient(timeout=15) as client:
