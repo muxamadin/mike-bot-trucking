@@ -1495,7 +1495,7 @@ def _ai_complete(system: str, messages: list, max_tokens: int = 400, model_hint:
     """Unified AI call — uses Groq if available, else Anthropic."""
     if _USE_GROQ:
         # Map model hints to Groq models
-        model = "llama-3.3-70b-versatile" if model_hint == "smart" else "llama-3.3-70b-versatile"
+        model = "groq/compound" if model_hint == "smart" else "groq/compound-mini"
         resp = _groq_client.chat.completions.create(
             model=model,
             max_tokens=max_tokens,
