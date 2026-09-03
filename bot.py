@@ -147,6 +147,14 @@ RC_FROM_NUMBER = os.environ.get("RC_FROM_NUMBER", "")
 FB_EMAIL    = os.environ.get("FB_EMAIL", "")
 FB_PASSWORD = os.environ.get("FB_PASSWORD", "")
 
+# ── Samba Safety (MVR) ────────────────────────────────────────────────────────
+SAMBA_EMAIL    = os.environ.get("SAMBA_EMAIL", "safety@longruntrucking.com")
+SAMBA_PASSWORD = os.environ.get("SAMBA_PASSWORD", "b6T^3Xbn@2B%gE2")
+
+# ── Quick Manage (TMS) ────────────────────────────────────────────────────────
+QM_EMAIL    = os.environ.get("QM_EMAIL", "safety@longruntrucking.com")
+QM_PASSWORD = os.environ.get("QM_PASSWORD", "Safetyrun2026")
+
 # ── Google Sheets (lead collection via Apps Script webhook) ──────────────────
 GOOGLE_SHEETS_WEBHOOK = os.environ.get(
     "GOOGLE_SHEETS_WEBHOOK",
@@ -301,6 +309,141 @@ En buzón NO menciones el nombre de la compañía — solo "Soy Mike".
 - Si dice que no dos veces: "Órale bro, cuídate!" y termina
 - NUNCA menciones IA, bot o script
 - No pidas documentos ni número de licencia"""
+
+
+async def pull_mvr_and_upload(driver_name: str, cdl_number: str, manager_id: int, bot) -> str:
+    """Log into Samba Safety, download MVR PDF, upload to Quick Manage driver profile."""
+    import tempfile, os as _os
+    from playwright.async_api import async_playwright
+
+    status_msg = await bot.send_message(manager_id, f"🔄 Pulling MVR for {driver_name}... logging into Samba Safety")
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        context = await browser.new_context(accept_downloads=True)
+        page = await context.new_page()
+
+        try:
+            # ── STEP 1: Login to Samba Safety ──────────────────────────────────
+            await page.goto("https://app.sambasafety.com/login", timeout=30000)
+            await page.wait_for_load_state("networkidle")
+
+            await page.fill('input[type="email"], input[name="email"], input[id*="email"]', SAMBA_EMAIL)
+            await page.fill('input[type="password"], input[name="password"]', SAMBA_PASSWORD)
+            await page.click('button[type="submit"], input[type="submit"]')
+            await page.wait_for_load_state("networkidle", timeout=15000)
+
+            # ── STEP 2: Search for driver ──────────────────────────────────────
+            await bot.edit_message_text(f"🔍 Searching for {driver_name} in Samba Safety...", manager_id, status_msg.message_id)
+            await page.goto("https://app.sambasafety.com/mvr/monitoring", timeout=30000)
+            await page.wait_for_load_state("networkidle")
+
+            # Try searching by name
+            search_box = page.locator('input[placeholder*="search" i], input[placeholder*="driver" i], input[type="search"]').first
+            if await search_box.count() > 0:
+                await search_box.fill(driver_name)
+                await page.wait_for_timeout(2000)
+
+            # Click on driver row
+            driver_row = page.locator(f'text="{driver_name}"').first
+            if await driver_row.count() == 0:
+                # Try partial name match
+                first_name = driver_name.split()[0]
+                driver_row = page.locator(f'text="{first_name}"').first
+
+            if await driver_row.count() == 0:
+                await browser.close()
+                return f"❌ Driver '{driver_name}' not found in Samba Safety. Make sure the name matches exactly."
+
+            await driver_row.click()
+            await page.wait_for_load_state("networkidle")
+
+            # ── STEP 3: Download MVR PDF ───────────────────────────────────────
+            await bot.edit_message_text(f"📄 Downloading MVR PDF for {driver_name}...", manager_id, status_msg.message_id)
+
+            # Look for download/PDF button
+            download_btn = page.locator('button:has-text("Download"), a:has-text("Download"), button:has-text("PDF"), a:has-text("PDF"), button:has-text("MVR")').first
+            if await download_btn.count() == 0:
+                download_btn = page.locator('[data-testid*="download"], [class*="download"]').first
+
+            tmp_dir = tempfile.mkdtemp()
+            mvr_pdf_path = _os.path.join(tmp_dir, f"MVR_{driver_name.replace(' ', '_')}.pdf")
+
+            async with page.expect_download(timeout=20000) as dl_info:
+                await download_btn.click()
+            download = await dl_info.value
+            await download.save_as(mvr_pdf_path)
+
+            # ── STEP 4: Login to Quick Manage ──────────────────────────────────
+            await bot.edit_message_text(f"📤 Uploading MVR to Quick Manage for {driver_name}...", manager_id, status_msg.message_id)
+
+            qm_page = await context.new_page()
+            await qm_page.goto("https://app.quickmanage.com/login", timeout=30000)
+            await qm_page.wait_for_load_state("networkidle")
+
+            await qm_page.fill('input[type="email"], input[name="email"]', QM_EMAIL)
+            await qm_page.fill('input[type="password"], input[name="password"]', QM_PASSWORD)
+            await qm_page.click('button[type="submit"], input[type="submit"]')
+            await qm_page.wait_for_load_state("networkidle", timeout=15000)
+
+            # ── STEP 5: Find driver in QM ──────────────────────────────────────
+            await qm_page.goto("https://app.quickmanage.com/drivers", timeout=30000)
+            await qm_page.wait_for_load_state("networkidle")
+
+            qm_search = qm_page.locator('input[placeholder*="search" i], input[placeholder*="driver" i]').first
+            if await qm_search.count() > 0:
+                await qm_search.fill(driver_name)
+                await qm_page.wait_for_timeout(2000)
+
+            qm_driver = qm_page.locator(f'text="{driver_name}"').first
+            if await qm_driver.count() == 0:
+                first_name = driver_name.split()[0]
+                qm_driver = qm_page.locator(f'text="{first_name}"').first
+
+            if await qm_driver.count() == 0:
+                await browser.close()
+                return f"✅ MVR downloaded but ❌ driver '{driver_name}' not found in Quick Manage. MVR saved locally."
+
+            await qm_driver.click()
+            await qm_page.wait_for_load_state("networkidle")
+
+            # ── STEP 6: Click MVR upload box ───────────────────────────────────
+            mvr_box = qm_page.locator('text="MVR"').first
+            await mvr_box.click()
+            await qm_page.wait_for_timeout(1500)
+
+            # ── STEP 7: Upload PDF ─────────────────────────────────────────────
+            file_input = qm_page.locator('input[type="file"]').first
+            await file_input.set_input_files(mvr_pdf_path)
+            await qm_page.wait_for_timeout(2000)
+
+            # Fill Last Collected On date (today)
+            from datetime import date
+            today = date.today().strftime("%m/%d/%Y")
+            date_input = qm_page.locator('input[placeholder*="date" i], input[name*="date" i]').first
+            if await date_input.count() > 0:
+                await date_input.fill(today)
+
+            # Click Save/Submit
+            save_btn = qm_page.locator('button:has-text("Save"), button:has-text("Submit"), button:has-text("Upload")').first
+            if await save_btn.count() > 0:
+                await save_btn.click()
+                await qm_page.wait_for_timeout(2000)
+
+            await browser.close()
+
+            # Cleanup
+            try:
+                _os.remove(mvr_pdf_path)
+                _os.rmdir(tmp_dir)
+            except Exception:
+                pass
+
+            return f"✅ MVR for {driver_name} successfully pulled from Samba Safety and uploaded to Quick Manage!"
+
+        except Exception as e:
+            await browser.close()
+            return f"❌ MVR automation failed: {e}"
 
 
 async def make_recruiting_call(phone: str, driver_name: str = "", language: str = "en") -> dict:
@@ -3895,6 +4038,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user.id in manager_sessions:
 
         # ── Recruiting call command ───────────────────────────────────────────
+        # ── MVR command: "mvr John Smith 123456789" ───────────────────────────
+        mvr_match = re.match(r'^\s*mvr\s+(.+)', text, re.IGNORECASE)
+        if mvr_match:
+            parts = mvr_match.group(1).strip()
+            # Last token is CDL number if it looks like one (alphanumeric, 6-15 chars)
+            tokens = parts.split()
+            cdl_number = ""
+            driver_name = parts
+            if tokens and re.match(r'^[A-Z0-9]{6,15}$', tokens[-1], re.IGNORECASE):
+                cdl_number = tokens[-1]
+                driver_name = " ".join(tokens[:-1])
+            await update.message.reply_text(f"🔄 On it! Pulling MVR for **{driver_name}**...\nI'll update you as I go.", parse_mode="Markdown")
+            result = await pull_mvr_and_upload(driver_name, cdl_number, user.id, context.bot)
+            await update.message.reply_text(result)
+            return
+
         is_call_command = re.match(r'^\s*call\b', text, re.IGNORECASE)
         if is_call_command:
             # Detect language
@@ -4447,6 +4606,7 @@ async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ Manager mode activated. You can now use all manager commands.\n\n"
             "Commands:\n"
             "• `call [name] [phone]` — make a recruiting call\n"
+            "• `mvr [name] [CDL#]` — pull MVR & upload to Quick Manage\n"
             "• `leads: [state]` — find CDL-A driver leads\n"
             "• `teach: [fact]` — teach Mike something\n"
             "• `search: [topic]` — web search\n"
