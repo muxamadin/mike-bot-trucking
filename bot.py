@@ -2581,15 +2581,6 @@ async def daily_lead_hunter(bot=None):
     ]
 
     logger.info("🔍 Daily lead hunter started...")
-    if bot and OWNER_ID:
-        try:
-            await bot.send_message(
-                OWNER_ID,
-                "🔍 *Daily Lead Hunt Started*\nMike is searching for CDL-A drivers across the USA — mostly Florida.\nYou'll get updates as leads come in. 📋",
-                parse_mode="Markdown"
-            )
-        except Exception:
-            pass
 
     found_today = 0
 
@@ -2617,16 +2608,8 @@ async def daily_lead_hunter(bot=None):
             save_lead_queue(lead_queue)
             logger.info(f"  {location}: +{len(new_leads)} leads (total today: {found_today})")
 
-            if bot and OWNER_ID:
-                if new_leads:
-                    preview = "\n".join(f"  • {l['name']} — {l['phone']}" for l in new_leads[:3])
-                    msg = f"📋 *+{len(new_leads)} leads — {location}* ({found_today}/{TARGET})\n{preview}"
-                else:
-                    msg = f"🔍 Searched {location} — no new numbers found, moving on... ({found_today}/{TARGET})"
-                try:
-                    await bot.send_message(OWNER_ID, msg, parse_mode="Markdown")
-                except Exception:
-                    pass
+            if new_leads:
+                logger.info(f"  {location}: +{len(new_leads)} leads")
 
         except Exception as e:
             logger.warning(f"Lead hunter error for {location}: {e}")
@@ -4130,15 +4113,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # ── Regular driver/applicant flow ─────────────────────────────────────────
-    if OWNER_ID:
-        try:
-            await context.bot.send_message(
-                OWNER_ID,
-                f"💬 Message from {user.full_name} (@{user.username}):\n{text}"
-            )
-        except Exception:
-            pass
-
     if not is_away():
         return
 
