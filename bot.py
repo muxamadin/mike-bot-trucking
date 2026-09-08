@@ -3357,21 +3357,45 @@ def get_user_context(user_id: int) -> str:
 # Manager sessions — users who unlocked manager mode with password
 MANAGER_SESSIONS_FILE = DATA_DIR / "manager_sessions.json"
 
-def load_manager_sessions() -> set:
+# Role passwords
+ROLE_PASSWORDS = {
+    "admin":  "Mike223344",
+    "hr":     "HR1234",
+    "safety": "SAFETY1234",
+}
+
+# HR group chat ID — set after Mike is added to the HR group
+HR_GROUP_ID = int(os.getenv("HR_GROUP_ID", "0"))
+
+def load_manager_sessions() -> dict:
+    """Returns {user_id: role} mapping."""
     if MANAGER_SESSIONS_FILE.exists():
         try:
-            return set(json.loads(MANAGER_SESSIONS_FILE.read_text()))
+            data = json.loads(MANAGER_SESSIONS_FILE.read_text())
+            # migrate old format (list of ints) to new dict format
+            if isinstance(data, list):
+                return {uid: "admin" for uid in data}
+            return {int(k): v for k, v in data.items()}
         except:
-            return set()
-    return set()
+            return {}
+    return {}
 
-def save_manager_sessions(sessions: set):
+def save_manager_sessions(sessions: dict):
     try:
-        MANAGER_SESSIONS_FILE.write_text(json.dumps(list(sessions)))
+        MANAGER_SESSIONS_FILE.write_text(json.dumps({str(k): v for k, v in sessions.items()}))
     except:
         pass
 
-manager_sessions: set = load_manager_sessions()
+def get_role(user_id: int) -> str:
+    """Returns role string or empty string if not authenticated."""
+    return manager_sessions.get(user_id, "")
+
+def has_role(user_id: int, *roles) -> bool:
+    """True if user has one of the given roles (admin always passes)."""
+    r = get_role(user_id)
+    return r == "admin" or r in roles
+
+manager_sessions: dict = load_manager_sessions()
 
 MANAGER_SYSTEM_PROMPT = """You are Mike Azim, the internal AI assistant for the management team of Long Run Trucking LLC. You are speaking with a verified manager — treat them as a trusted colleague with full access.
 
@@ -3891,9 +3915,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     text = update.message.text or ""
 
-    # OWNER always gets full manager access — auto-add to manager sessions
+    # OWNER always gets full admin access
     if user.id == OWNER_ID:
-        manager_sessions.add(user.id)
+        manager_sessions[user.id] = "admin"
 
     # ── Security: blocked users ───────────────────────────────────────────────
     if user.id in _blocked_users:
@@ -3924,20 +3948,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("I can't help with that.")
         return
 
-    # ── Manager password check ────────────────────────────────────────────────
-    if text.strip() == MANAGER_PASSWORD and user.id not in manager_sessions:
-        manager_sessions.add(user.id)
+    # ── Role-based login ──────────────────────────────────────────────────────
+    # Accepts: "admin Mike223344", "hr HR1234", "safety SAFETY1234"
+    # Also still accepts bare admin password for backwards compat
+    login_match = re.match(r'^(admin|hr|safety)\s+(\S+)$', text.strip(), re.IGNORECASE)
+    if login_match:
+        role_input = login_match.group(1).lower()
+        pwd_input  = login_match.group(2)
+        if ROLE_PASSWORDS.get(role_input) == pwd_input:
+            manager_sessions[user.id] = role_input
+            save_manager_sessions(manager_sessions)
+            role_label = {"admin": "🔑 Admin", "hr": "👥 HR", "safety": "🛡 Safety"}[role_input]
+            cmds = {
+                "admin": "• `call [name] [phone]` — recruiting call\n• `mvr [name] [CDL#]` — pull MVR\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `teach: [fact]` — teach Mike\n• `search: [topic]` — web search\n• `broadcast: [msg]` — send to all drivers",
+                "hr":    "• `call [name] [phone]` — recruiting call\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats",
+                "safety":"• `mvr [name] [CDL#]` — pull MVR & upload to QM\n• `search: [topic]` — web search",
+            }[role_input]
+            await update.message.reply_text(
+                f"✅ {role_label} mode activated.\n\nCommands:\n{cmds}\n\n• `logout` — exit",
+                parse_mode="Markdown"
+            )
+            return
+        else:
+            await update.message.reply_text("❌ Wrong password.")
+            return
+
+    # Backwards compat: bare admin password
+    if text.strip() == ROLE_PASSWORDS["admin"] and user.id not in manager_sessions:
+        manager_sessions[user.id] = "admin"
         save_manager_sessions(manager_sessions)
         await update.message.reply_text(
-            "✅ Manager mode activated. How can I help you?",
+            "✅ Admin mode activated.\n\nCommands:\n• `call [name] [phone]` — recruiting call\n• `mvr [name] [CDL#]` — pull MVR\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `logout` — exit",
+            parse_mode="Markdown"
         )
         return
 
-    # ── Manager logout ────────────────────────────────────────────────────────
+    # ── Logout ────────────────────────────────────────────────────────────────
     if text.strip().lower() == "logout" and user.id in manager_sessions and user.id != OWNER_ID:
-        manager_sessions.discard(user.id)
+        del manager_sessions[user.id]
         save_manager_sessions(manager_sessions)
-        await update.message.reply_text("👋 Logged out of manager mode.")
+        await update.message.reply_text("👋 Logged out.")
         return
 
     # ── Employee mode — registered drivers ───────────────────────────────────
@@ -4037,7 +4087,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── Manager mode — full internal assistant ────────────────────────────────
     if user.id in manager_sessions:
 
-        # ── Recruiting call command ───────────────────────────────────────────
         # ── MVR command: "mvr John Smith 123456789" ───────────────────────────
         mvr_match = re.match(r'^\s*mvr\s+(.+)', text, re.IGNORECASE)
         if mvr_match:
@@ -4586,6 +4635,51 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(reply)
 
 
+async def hr_daily_update_loop(bot):
+    """Sends a daily HR summary to the HR group chat every morning at 8 AM ET."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            # 8 AM ET = 13:00 UTC (EST) or 12:00 UTC (EDT)
+            target_hour = 13
+            next_run = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+            if now >= next_run:
+                next_run = next_run.replace(day=now.day + 1)
+            wait_secs = (next_run - now).total_seconds()
+            await asyncio.sleep(wait_secs)
+
+            if not HR_GROUP_ID:
+                continue
+
+            # Pull stats from Supabase
+            leads_today = 0
+            hot_leads = 0
+            try:
+                from supabase import create_client
+                sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                from datetime import date
+                today_str = date.today().isoformat()
+                r = sb_client.table("leads").select("id, status, called").gte("created_at", today_str).execute()
+                leads = r.data or []
+                leads_today = len(leads)
+                hot_leads = sum(1 for l in leads if "Hot" in (l.get("status") or ""))
+            except Exception:
+                pass
+
+            msg = (
+                f"📊 *Daily HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
+                f"🎯 Leads found today: *{leads_today}*\n"
+                f"🔥 Hot leads: *{hot_leads}*\n\n"
+                f"Use `call [name] [phone]` to start recruiting.\n"
+                f"Use `stats` to see today's call results."
+            )
+            await bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
+            logger.info(f"HR daily update sent to group {HR_GROUP_ID}")
+        except Exception as e:
+            logger.error(f"HR daily update error: {e}")
+            await asyncio.sleep(3600)
+
+
 async def post_init(application):
     """Run after bot starts — kick off background learning and lead hunting."""
     asyncio.create_task(startup_learning())
@@ -4593,24 +4687,34 @@ async def post_init(application):
     asyncio.create_task(daily_lead_loop(bot=application.bot))
     asyncio.create_task(followup_loop(bot=application.bot))
     # asyncio.create_task(weigh_station_loop(bot=application.bot))  # disabled
+    asyncio.create_task(hr_daily_update_loop(bot=application.bot))
 
 
 async def handle_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """High-priority handler: catches manager password at any point in any flow."""
+    """High-priority handler: catches role login at any point in any flow."""
     user = update.effective_user
     text = (update.message.text or "").strip()
-    if text == MANAGER_PASSWORD:
-        manager_sessions.add(user.id)
+    login_match = re.match(r'^(admin|hr|safety)\s+(\S+)$', text, re.IGNORECASE)
+    pwd = text
+    role = None
+    if login_match:
+        r = login_match.group(1).lower()
+        p = login_match.group(2)
+        if ROLE_PASSWORDS.get(r) == p:
+            role = r
+    elif pwd == ROLE_PASSWORDS["admin"]:
+        role = "admin"
+    if role:
+        manager_sessions[user.id] = role
         save_manager_sessions(manager_sessions)
+        role_label = {"admin": "🔑 Admin", "hr": "👥 HR", "safety": "🛡 Safety"}[role]
+        cmds = {
+            "admin": "• `call [name] [phone]`\n• `mvr [name] [CDL#]`\n• `leads: [state]`\n• `stats` / `numbers`\n• `teach: [fact]`\n• `search: [topic]`",
+            "hr":    "• `call [name] [phone]`\n• `leads: [state]`\n• `stats` / `numbers`",
+            "safety":"• `mvr [name] [CDL#]`\n• `search: [topic]`",
+        }[role]
         await update.message.reply_text(
-            "✅ Manager mode activated. You can now use all manager commands.\n\n"
-            "Commands:\n"
-            "• `call [name] [phone]` — make a recruiting call\n"
-            "• `mvr [name] [CDL#]` — pull MVR & upload to Quick Manage\n"
-            "• `leads: [state]` — find CDL-A driver leads\n"
-            "• `teach: [fact]` — teach Mike something\n"
-            "• `search: [topic]` — web search\n"
-            "• `logout` — exit manager mode",
+            f"✅ {role_label} mode activated.\n\nCommands:\n{cmds}\n• `logout` — exit",
             parse_mode="Markdown"
         )
         return ConversationHandler.END
