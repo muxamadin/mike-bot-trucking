@@ -3960,8 +3960,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             save_manager_sessions(manager_sessions)
             role_label = {"admin": "🔑 Admin", "hr": "👥 HR", "safety": "🛡 Safety"}[role_input]
             cmds = {
-                "admin": "• `call [name] [phone]` — recruiting call\n• `mvr [name] [CDL#]` — pull MVR\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `teach: [fact]` — teach Mike\n• `search: [topic]` — web search\n• `broadcast: [msg]` — send to all drivers",
-                "hr":    "• `call [name] [phone]` — recruiting call\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats",
+                "admin": "• `call [name] [phone]` — recruiting call\n• `mvr [name] [CDL#]` — pull MVR\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `teach: [fact]` — teach Mike\n• `search: [topic]` — web search\n• `broadcast: [msg]` — send to all drivers\n• `hiring add [name] - [status]` — add to pipeline\n• `hiring update [name] - [status]` — update status\n• `hiring done [name]` — mark hired\n• `hiring list` — show pipeline\n• `hometime add [name] - [N] days` — track driver out\n• `hometime back [name]` — mark driver home\n• `hometime list` — show who's out",
+                "hr":    "• `call [name] [phone]` — recruiting call\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `hiring add [name] - [status]` — add to pipeline\n• `hiring update [name] - [status]` — update status\n• `hiring done [name]` — mark hired\n• `hiring list` — show pipeline\n• `hometime add [name] - [N] days` — track driver out\n• `hometime back [name]` — mark driver home\n• `hometime list` — show who's out",
                 "safety":"• `mvr [name] [CDL#]` — pull MVR & upload to QM\n• `search: [topic]` — web search",
             }[role_input]
             await update.message.reply_text(
@@ -4101,6 +4101,119 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"🔄 On it! Pulling MVR for **{driver_name}**...\nI'll update you as I go.", parse_mode="Markdown")
             result = await pull_mvr_and_upload(driver_name, cdl_number, user.id, context.bot)
             await update.message.reply_text(result)
+            return
+
+        # ── HIRING PIPELINE commands ──────────────────────────────────────────
+        # "hiring add John Smith - Applied"  or  "hiring update John Smith - Orientation"
+        # "hiring list"   "hiring done John Smith"
+        hiring_add = re.match(r'^\s*hiring\s+add\s+(.+?)\s*[-–]\s*(.+)', text, re.IGNORECASE)
+        hiring_update = re.match(r'^\s*hiring\s+update\s+(.+?)\s*[-–]\s*(.+)', text, re.IGNORECASE)
+        hiring_done = re.match(r'^\s*hiring\s+done\s+(.+)', text, re.IGNORECASE)
+        hiring_list = re.match(r'^\s*hiring\s+list', text, re.IGNORECASE)
+
+        if hiring_add or hiring_update:
+            m = hiring_add or hiring_update
+            drv_name = m.group(1).strip()
+            drv_status = m.group(2).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                existing = _sb.table("hiring_pipeline").select("id").ilike("name", drv_name).execute()
+                if existing.data:
+                    _sb.table("hiring_pipeline").update({"status": drv_status, "updated_at": "now()"}).ilike("name", drv_name).execute()
+                    await update.message.reply_text(f"✅ Updated *{drv_name}* → {drv_status}", parse_mode="Markdown")
+                else:
+                    _sb.table("hiring_pipeline").insert({"name": drv_name, "status": drv_status, "added_by": user.id}).execute()
+                    await update.message.reply_text(f"✅ Added *{drv_name}* to hiring pipeline — {drv_status}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if hiring_done:
+            drv_name = hiring_done.group(1).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("hiring_pipeline").update({"status": "Hired ✅", "updated_at": "now()"}).ilike("name", drv_name).execute()
+                await update.message.reply_text(f"🎉 *{drv_name}* marked as Hired!", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if hiring_list:
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                rows = _sb.table("hiring_pipeline").select("name,status,updated_at").neq("status", "Hired ✅").order("updated_at", desc=False).execute()
+                if not rows.data:
+                    await update.message.reply_text("📋 No active hiring pipeline entries.")
+                else:
+                    lines = ["📋 *Hiring Pipeline:*\n"]
+                    for r in rows.data:
+                        lines.append(f"• *{r['name']}* — {r['status']}")
+                    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        # ── HOME TIME TRACKER commands ─────────────────────────────────────────
+        # "hometime add John Smith - 14 days"  "hometime list"  "hometime back John Smith"
+        ht_add = re.match(r'^\s*hometime\s+add\s+(.+?)\s*[-–]\s*(\d+)\s*days?', text, re.IGNORECASE)
+        ht_back = re.match(r'^\s*hometime\s+back\s+(.+)', text, re.IGNORECASE)
+        ht_list = re.match(r'^\s*hometime\s+list', text, re.IGNORECASE)
+
+        if ht_add:
+            drv_name = ht_add.group(1).strip()
+            days_out = int(ht_add.group(2))
+            from datetime import date, timedelta
+            due_date = (date.today() + timedelta(days=days_out)).isoformat()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                existing = _sb.table("home_time").select("id").ilike("name", drv_name).eq("status", "out").execute()
+                if existing.data:
+                    _sb.table("home_time").update({"weeks_out": days_out // 7, "due_home_date": due_date}).ilike("name", drv_name).eq("status", "out").execute()
+                    await update.message.reply_text(f"✅ Updated *{drv_name}* — due home {due_date}", parse_mode="Markdown")
+                else:
+                    _sb.table("home_time").insert({"name": drv_name, "weeks_out": days_out // 7, "due_home_date": due_date, "status": "out", "added_by": user.id}).execute()
+                    await update.message.reply_text(f"✅ *{drv_name}* added — out for {days_out} days, due home {due_date}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if ht_back:
+            drv_name = ht_back.group(1).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("home_time").update({"status": "home"}).ilike("name", drv_name).eq("status", "out").execute()
+                await update.message.reply_text(f"🏠 *{drv_name}* marked as home!", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if ht_list:
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                from datetime import date
+                rows = _sb.table("home_time").select("name,due_home_date,weeks_out").eq("status", "out").order("due_home_date").execute()
+                if not rows.data:
+                    await update.message.reply_text("🏠 No drivers currently out.")
+                else:
+                    today = date.today()
+                    lines = ["🏠 *Drivers Out — Home Time Tracker:*\n"]
+                    for r in rows.data:
+                        due = r.get("due_home_date", "?")
+                        if due and due != "?":
+                            days_left = (date.fromisoformat(due) - today).days
+                            flag = "🔴" if days_left <= 0 else ("🟡" if days_left <= 3 else "🟢")
+                            lines.append(f"{flag} *{r['name']}* — due home {due} ({days_left}d)")
+                        else:
+                            lines.append(f"• *{r['name']}*")
+                    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
             return
 
         is_call_command = re.match(r'^\s*call\b', text, re.IGNORECASE)
@@ -4654,6 +4767,8 @@ async def hr_daily_update_loop(bot):
             # Pull stats from Supabase
             leads_today = 0
             hot_leads = 0
+            hiring_lines = []
+            hometime_lines = []
             try:
                 from supabase import create_client
                 sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -4663,15 +4778,36 @@ async def hr_daily_update_loop(bot):
                 leads = r.data or []
                 leads_today = len(leads)
                 hot_leads = sum(1 for l in leads if "Hot" in (l.get("status") or ""))
+
+                # Hiring pipeline
+                hp = sb_client.table("hiring_pipeline").select("name,status").neq("status", "Hired ✅").order("updated_at").execute()
+                for row in (hp.data or []):
+                    hiring_lines.append(f"  • {row['name']} — {row['status']}")
+
+                # Home time tracker
+                ht = sb_client.table("home_time").select("name,due_home_date").eq("status", "out").order("due_home_date").execute()
+                today = date.today()
+                for row in (ht.data or []):
+                    due = row.get("due_home_date", "?")
+                    if due and due != "?":
+                        days_left = (date.fromisoformat(due) - today).days
+                        flag = "🔴" if days_left <= 0 else ("🟡" if days_left <= 3 else "🟢")
+                        hometime_lines.append(f"  {flag} {row['name']} — due {due} ({days_left}d)")
+                    else:
+                        hometime_lines.append(f"  • {row['name']}")
             except Exception:
                 pass
+
+            hiring_section = "\n".join(hiring_lines) if hiring_lines else "  None"
+            hometime_section = "\n".join(hometime_lines) if hometime_lines else "  None"
 
             msg = (
                 f"📊 *Daily HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
                 f"🎯 Leads found today: *{leads_today}*\n"
                 f"🔥 Hot leads: *{hot_leads}*\n\n"
-                f"Use `call [name] [phone]` to start recruiting.\n"
-                f"Use `stats` to see today's call results."
+                f"📋 *Hiring Pipeline:*\n{hiring_section}\n\n"
+                f"🏠 *Drivers Out / Home Time:*\n{hometime_section}\n\n"
+                f"Use `hiring list` or `hometime list` for details."
             )
             await bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
             logger.info(f"HR daily update sent to group {HR_GROUP_ID}")
