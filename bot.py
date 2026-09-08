@@ -1461,6 +1461,15 @@ def _ai_complete(system: str, messages: list, max_tokens: int = 400, model_hint:
     else:
         raise Exception("No AI provider configured. Set GROQ_API_KEY or ANTHROPIC_API_KEY.")
 
+async def safe_reply(update, text, **kwargs):
+    """Send reply, splitting if over Telegram's 4096 char limit."""
+    MAX = 4000
+    if len(text) <= MAX:
+        await update.message.reply_text(text, **kwargs)
+    else:
+        for i in range(0, len(text), MAX):
+            await update.message.reply_text(text[i:i+MAX], **kwargs)
+
 MANAGER_PASSWORD = "Mike223344"
 
 REQUIRED_DOCUMENTS = ["CDL (front & back photo)", "Medical card", "Phone number"]
@@ -3623,8 +3632,8 @@ async def ask_claude_manager(user_id: int, question: str) -> str:
             content = f"{question}\n\n[LIVE DATA FETCHED FROM FMCSA RIGHT NOW]:\n{safer_data}"
 
         conversation_history[uid].append({"role": "user", "content": content})
-        conversation_history[uid] = conversation_history[uid][-20:]
-        reply = _ai_complete(MANAGER_SYSTEM_PROMPT, conversation_history[uid], max_tokens=800, model_hint="smart")
+        conversation_history[uid] = conversation_history[uid][-6:]
+        reply = _ai_complete(MANAGER_SYSTEM_PROMPT, conversation_history[uid], max_tokens=600, model_hint="smart")
         conversation_history[uid].append({"role": "assistant", "content": reply})
         save_history(conversation_history)
         return reply
@@ -3649,8 +3658,7 @@ async def ask_claude(user_id: int, question: str) -> str:
             system += "\n\n" + knowledge_ctx
 
         conversation_history[uid].append({"role": "user", "content": question})
-        conversation_history[uid] = conversation_history[uid][-20:]
-
+        conversation_history[uid] = conversation_history[uid][-6:]
         reply = _ai_complete(system, conversation_history[uid], max_tokens=300, model_hint="smart")
 
         # Security: block reply if it somehow contains sensitive data
@@ -4817,7 +4825,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         reply = await ask_claude_manager(user.id, text)
-        await update.message.reply_text(reply)
+        await safe_reply(update, reply)
         return
 
     # ── Regular driver/applicant flow ─────────────────────────────────────────
@@ -4834,7 +4842,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     reply = await ask_claude(user.id, text)
-    await update.message.reply_text(reply)
+    await safe_reply(update, reply)
 
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
