@@ -4104,6 +4104,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ── HIRING PIPELINE commands ──────────────────────────────────────────
+        # ── TEAM UPDATES ─────────────────────────────────────────────────────
+        # "update T101 - oil change done"  or  "updates list"
+        update_list = re.match(r'^\s*updates?\s+list', text, re.IGNORECASE)
+        update_add = re.match(r'^\s*update\s+(.+)', text, re.IGNORECASE)
+
+        if update_list:
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                from datetime import date, timedelta
+                since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                rows = _sb.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at", desc=False).execute()
+                if not rows.data:
+                    await update.message.reply_text("📬 No team updates in the last 24 hours.")
+                else:
+                    lines = ["📬 *Team Updates (last 24h):*\n"]
+                    for r in rows.data:
+                        ts = r["created_at"][:16].replace("T", " ")
+                        lines.append(f"• [{ts}] *{r['sender_name']}*: {r['message']}")
+                    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if update_add and not re.match(r'^\s*update\s+(T\d+\s*[-–]|ready|assign|wait|note|done|list)', text, re.IGNORECASE):
+            msg_text = update_add.group(1).strip()
+            sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("team_updates").insert({"message": msg_text, "sender_name": sender_name, "sender_id": user.id}).execute()
+                await update.message.reply_text(f"✅ Update saved: {msg_text}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
         # ── TRUCK LIST commands ───────────────────────────────────────────────
         # truck add T101 - shop - brakes need fixing
         # truck ready T101 - Jan 15
@@ -4884,6 +4920,7 @@ async def hr_daily_update_loop(bot):
             hiring_lines = []
             hometime_lines = []
             truck_lines = []
+            update_lines = []
             try:
                 from supabase import create_client
                 sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -4923,12 +4960,21 @@ async def hr_daily_update_loop(bot):
                     if row.get("notes"):
                         tline += f" | {row['notes']}"
                     truck_lines.append(tline)
+
+                # Team updates from last 24h
+                from datetime import timedelta
+                since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                upd = sb_client.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at").execute()
+                for row in (upd.data or []):
+                    ts = row["created_at"][11:16]
+                    update_lines.append(f"  • [{ts}] {row['sender_name']}: {row['message']}")
             except Exception:
                 pass
 
             hiring_section = "\n".join(hiring_lines) if hiring_lines else "  None"
             hometime_section = "\n".join(hometime_lines) if hometime_lines else "  None"
             truck_section = "\n".join(truck_lines) if truck_lines else "  None"
+            updates_section = "\n".join(update_lines) if update_lines else "  No updates"
 
             msg = (
                 f"📊 *Daily HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
@@ -4936,8 +4982,8 @@ async def hr_daily_update_loop(bot):
                 f"🔥 Hot leads: *{hot_leads}*\n\n"
                 f"📋 *Hiring Pipeline:*\n{hiring_section}\n\n"
                 f"🏠 *Drivers Out / Home Time:*\n{hometime_section}\n\n"
-                f"🚛 *Truck Status:*\n{truck_section}\n\n"
-                f"Use `truck list` · `hiring list` · `hometime list` for details."
+                f"🚛 *Unit Status:*\n{truck_section}\n\n"
+                f"📬 *Team Updates (24h):*\n{updates_section}"
             )
             await bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
             logger.info(f"HR daily update sent to group {HR_GROUP_ID}")
