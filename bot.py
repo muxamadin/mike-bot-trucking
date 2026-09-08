@@ -3377,28 +3377,91 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             return
 
-        # ── Auto-detect work updates ──────────────────────────────────────────
-        # If a role user types something that sounds like a status update,
-        # save it automatically — no prefix needed.
+        # ── Smart auto-save: extract driver/truck info from natural messages ────
         _is_question = text.strip().endswith("?")
         _known_cmd = re.match(
             r'^\s*(call|mvr|leads?|stats|numbers|logout|broadcast|teach|search|hiring|hometime|truck|update)',
             text, re.IGNORECASE
         )
-        _update_keywords = re.search(
-            r'\b(did|passed|failed|completed|started|arrived|left|picked up|delivered|called|hired|fired|quit|resigned|drug test|physical|dot|orientation|background|signed|approved|denied|refused|no show|late|accident|breakdown|fixed|ready|loaded|unloaded|home|dispatched|assigned|waiting|terminated|onboard|paperwork|cdl|mvr|psp|cleared|flagged|scheduled|interviewed|offered)\b',
-            text, re.IGNORECASE
-        )
-        if not _is_question and not _known_cmd and _update_keywords and len(text.strip()) > 5:
+        if not _is_question and not _known_cmd and len(text.strip()) > 5:
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+            # Use AI to extract structured info
+            extract_prompt = f"""You are a data extractor for a trucking company. From this message extract any info about drivers or trucks.
+
+Message: "{text}"
+
+Reply ONLY with JSON in this exact format (use null if not mentioned):
+{{
+  "type": "driver" | "truck" | "update" | "none",
+  "truck_unit": null or "T101",
+  "truck_status": null or "shop" or "ready" or "assigned" or "waiting",
+  "truck_notes": null or "brief note",
+  "driver_name": null or "Full Name",
+  "driver_pipeline_status": null or "Applied/Orientation/Drug Test/Background/Hired/etc",
+  "driver_hometime_days": null or number,
+  "is_work_update": true or false
+}}
+
+Only set is_work_update=true if it's clearly about company operations. Set type="none" if it's just casual chat."""
+
             try:
-                from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
-                _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
-                await update.message.reply_text("📬 Got it — logged to team updates.", parse_mode="Markdown")
+                import json as _json
+                raw = _ai_complete("You extract structured data.", [{"role": "user", "content": extract_prompt}], max_tokens=200, model_hint="fast")
+                # find JSON in response
+                jstart = raw.find("{")
+                jend = raw.rfind("}") + 1
+                if jstart >= 0 and jend > jstart:
+                    extracted = _json.loads(raw[jstart:jend])
+                    from supabase import create_client as _sc
+                    _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                    saved = []
+
+                    # Save truck info
+                    if extracted.get("truck_unit") and extracted.get("type") in ("truck", "update"):
+                        unit = extracted["truck_unit"].upper()
+                        status = extracted.get("truck_status") or "shop"
+                        status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+                        status_label = status_map.get(status, status)
+                        notes = extracted.get("truck_notes") or ""
+                        from datetime import date as _date
+                        _sb.table("trucks").upsert({"unit": unit, "status": status_label, "notes": notes, "arrived_date": _date.today().isoformat(), "added_by": user.id}, on_conflict="unit").execute()
+                        saved.append(f"🚛 {unit} — {status_label}")
+
+                    # Save driver hiring pipeline
+                    if extracted.get("driver_name") and extracted.get("driver_pipeline_status"):
+                        name = extracted["driver_name"]
+                        status = extracted["driver_pipeline_status"]
+                        existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
+                        if existing.data:
+                            _sb.table("hiring_pipeline").update({"status": status, "updated_at": "now()"}).ilike("name", name).execute()
+                        else:
+                            _sb.table("hiring_pipeline").insert({"name": name, "status": status, "added_by": user.id}).execute()
+                        saved.append(f"📋 {name} — {status}")
+
+                    # Save home time
+                    if extracted.get("driver_name") and extracted.get("driver_hometime_days"):
+                        name = extracted["driver_name"]
+                        days = int(extracted["driver_hometime_days"])
+                        from datetime import date as _date, timedelta as _td
+                        due = (_date.today() + _td(days=days)).isoformat()
+                        existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
+                        if existing.data:
+                            _sb.table("home_time").update({"weeks_out": days // 7, "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
+                        else:
+                            _sb.table("home_time").insert({"name": name, "weeks_out": days // 7, "due_home_date": due, "status": "out", "added_by": user.id}).execute()
+                        saved.append(f"🏠 {name} — out {days} days, due {due}")
+
+                    # Always save as team update if work-related
+                    if extracted.get("is_work_update") and extracted.get("type") != "none":
+                        _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
+                        if not saved:
+                            saved.append("logged")
+
+                    if saved:
+                        await update.message.reply_text("✅ Saved: " + " | ".join(saved))
+                        return
             except Exception:
                 pass
-            return
 
         # ── Anything else — Mike answers as AI assistant ───────────────────────
         # Fall through to the AI response below (same as regular drivers)
