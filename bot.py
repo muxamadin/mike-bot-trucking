@@ -3413,7 +3413,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
                 if jstart >= 0 and jend > jstart:
                     extracted = _json.loads(raw[jstart:jend])
                     from supabase import create_client as _sc
-                    _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                    _sb = _sc(_SB_URL, _SB_KEY)
                     saved = []
 
                     # Save truck info
@@ -3494,7 +3494,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
         if update_list:
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 from datetime import date, timedelta
                 since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
                 rows = _sb.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at", desc=False).execute()
@@ -3515,7 +3515,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("team_updates").insert({"message": msg_text, "sender_name": sender_name, "sender_id": user.id}).execute()
                 await update.message.reply_text(f"✅ Update saved: {msg_text}", parse_mode="Markdown")
             except Exception as e:
@@ -3546,7 +3546,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             status_label = status_map.get(status, status)
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 from datetime import date
                 _sb.table("trucks").upsert({"unit": unit, "status": status_label, "notes": notes, "arrived_date": date.today().isoformat(), "added_by": user.id}, on_conflict="unit").execute()
                 await update.message.reply_text(f"🚛 Truck *{unit}* added — {status_label}\n📝 {notes or 'No notes'}", parse_mode="Markdown")
@@ -3559,7 +3559,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             ready_date = (truck_ready.group(2) or "now").strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("trucks").update({"status": "✅ ready", "ready_date": ready_date, "updated_at": "now()"}).eq("unit", unit).execute()
                 await update.message.reply_text(f"✅ Truck *{unit}* is READY — {ready_date}", parse_mode="Markdown")
             except Exception as e:
@@ -3571,7 +3571,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             driver = truck_assign.group(2).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("trucks").update({"status": "👤 assigned", "assigned_driver": driver, "updated_at": "now()"}).eq("unit", unit).execute()
                 await update.message.reply_text(f"👤 Truck *{unit}* assigned to *{driver}*", parse_mode="Markdown")
             except Exception as e:
@@ -3583,7 +3583,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             driver = truck_wait.group(2).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("trucks").update({"status": "⏳ waiting", "assigned_driver": driver, "updated_at": "now()"}).eq("unit", unit).execute()
                 await update.message.reply_text(f"⏳ Truck *{unit}* on hold — waiting for *{driver}* (home time)", parse_mode="Markdown")
             except Exception as e:
@@ -3595,7 +3595,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             notes = truck_note.group(2).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("trucks").update({"notes": notes, "updated_at": "now()"}).eq("unit", unit).execute()
                 await update.message.reply_text(f"📝 Truck *{unit}* note updated: {notes}", parse_mode="Markdown")
             except Exception as e:
@@ -3606,7 +3606,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             unit = truck_done.group(1).upper()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("trucks").delete().eq("unit", unit).execute()
                 await update.message.reply_text(f"🗑️ Truck *{unit}* removed from list.", parse_mode="Markdown")
             except Exception as e:
@@ -3616,7 +3616,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
         if truck_list:
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 rows = _sb.table("trucks").select("unit,status,assigned_driver,notes,ready_date,arrived_date").order("arrived_date").execute()
                 if not rows.data:
                     await update.message.reply_text("🚛 No trucks in the list.")
@@ -3649,7 +3649,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             drv_status = m.group(2).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 existing = _sb.table("hiring_pipeline").select("id").ilike("name", drv_name).execute()
                 if existing.data:
                     _sb.table("hiring_pipeline").update({"status": drv_status, "updated_at": "now()"}).ilike("name", drv_name).execute()
@@ -3665,7 +3665,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             drv_name = hiring_done.group(1).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("hiring_pipeline").update({"status": "Hired ✅", "updated_at": "now()"}).ilike("name", drv_name).execute()
                 await update.message.reply_text(f"🎉 *{drv_name}* marked as Hired!", parse_mode="Markdown")
             except Exception as e:
@@ -3675,7 +3675,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
         if hiring_list:
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 rows = _sb.table("hiring_pipeline").select("name,status,updated_at").neq("status", "Hired ✅").order("updated_at", desc=False).execute()
                 if not rows.data:
                     await update.message.reply_text("📋 No active hiring pipeline entries.")
@@ -3701,7 +3701,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             due_date = (date.today() + timedelta(days=days_out)).isoformat()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 existing = _sb.table("home_time").select("id").ilike("name", drv_name).eq("status", "out").execute()
                 if existing.data:
                     _sb.table("home_time").update({"weeks_out": days_out // 7, "due_home_date": due_date}).ilike("name", drv_name).eq("status", "out").execute()
@@ -3717,7 +3717,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
             drv_name = ht_back.group(1).strip()
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 _sb.table("home_time").update({"status": "home"}).ilike("name", drv_name).eq("status", "out").execute()
                 await update.message.reply_text(f"🏠 *{drv_name}* marked as home!", parse_mode="Markdown")
             except Exception as e:
@@ -3727,7 +3727,7 @@ Only set is_work_update=true if it's clearly about company operations. Set type=
         if ht_list:
             try:
                 from supabase import create_client as _sc
-                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb = _sc(_SB_URL, _SB_KEY)
                 from datetime import date
                 rows = _sb.table("home_time").select("name,due_home_date,weeks_out").eq("status", "out").order("due_home_date").execute()
                 if not rows.data:
@@ -4296,7 +4296,7 @@ async def hr_daily_update_loop(bot):
             update_lines = []
             try:
                 from supabase import create_client
-                sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                sb_client = create_client(_SB_URL, _SB_KEY)
                 from datetime import date
                 today_str = date.today().isoformat()
                 r = sb_client.table("leads").select("id, status, called").gte("created_at", today_str).execute()
