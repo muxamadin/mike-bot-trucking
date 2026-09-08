@@ -4203,7 +4203,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if not rows.data:
                     await update.message.reply_text("🚛 No trucks in the list.")
                 else:
-                    lines = ["🚛 *Truck List:*\n"]
+                    lines = ["🚛 *Unit List:*\n"]
                     for r in rows.data:
                         line = f"*{r['unit']}* — {r['status']}"
                         if r.get("assigned_driver"):
@@ -4211,7 +4211,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         if r.get("ready_date"):
                             line += f" | ready: {r['ready_date']}"
                         if r.get("notes"):
-                            line += f"\n    📝 {r['notes']}"
+                            line += f" | {r['notes']}"
                         lines.append(line)
                     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
@@ -4883,6 +4883,7 @@ async def hr_daily_update_loop(bot):
             hot_leads = 0
             hiring_lines = []
             hometime_lines = []
+            truck_lines = []
             try:
                 from supabase import create_client
                 sb_client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
@@ -4898,6 +4899,18 @@ async def hr_daily_update_loop(bot):
                 for row in (hp.data or []):
                     hiring_lines.append(f"  • {row['name']} — {row['status']}")
 
+                # Home time tracker
+                ht = sb_client.table("home_time").select("name,due_home_date").eq("status", "out").order("due_home_date").execute()
+                today = date.today()
+                for row in (ht.data or []):
+                    due = row.get("due_home_date", "?")
+                    if due and due != "?":
+                        days_left = (date.fromisoformat(due) - today).days
+                        flag = "🔴" if days_left <= 0 else ("🟡" if days_left <= 3 else "🟢")
+                        hometime_lines.append(f"  {flag} {row['name']} — due {due} ({days_left}d)")
+                    else:
+                        hometime_lines.append(f"  • {row['name']}")
+
                 # Truck list
                 truck_lines = []
                 tr = sb_client.table("trucks").select("unit,status,assigned_driver,notes,ready_date").order("arrived_date").execute()
@@ -4910,18 +4923,6 @@ async def hr_daily_update_loop(bot):
                     if row.get("notes"):
                         tline += f" | {row['notes']}"
                     truck_lines.append(tline)
-
-                # Home time tracker
-                ht = sb_client.table("home_time").select("name,due_home_date").eq("status", "out").order("due_home_date").execute()
-                today = date.today()
-                for row in (ht.data or []):
-                    due = row.get("due_home_date", "?")
-                    if due and due != "?":
-                        days_left = (date.fromisoformat(due) - today).days
-                        flag = "🔴" if days_left <= 0 else ("🟡" if days_left <= 3 else "🟢")
-                        hometime_lines.append(f"  {flag} {row['name']} — due {due} ({days_left}d)")
-                    else:
-                        hometime_lines.append(f"  • {row['name']}")
             except Exception:
                 pass
 
