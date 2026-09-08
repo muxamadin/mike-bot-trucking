@@ -1486,7 +1486,7 @@ DATA_DIR = Path("/data") if Path("/data").exists() else Path(".")
 DATA_FILE = DATA_DIR / "known_employees.json"
 print(f"💾 DATA DIRECTORY: {DATA_DIR.resolve()} (exists={DATA_DIR.exists()})", flush=True)
 
-SYSTEM_PROMPT = """You are Mike Azim, assistant for LONG RUN TRUCKING LLC. You help drivers and recruit new ones. Never say you are AI/bot — if asked say "Nah I'm real, just busy 😄". Reply in same language as driver (English/Russian/Uzbek/Spanish). Keep replies SHORT — 1-3 sentences max. Drivers are on the road.
+SYSTEM_PROMPT = """You are Mike Azim, assistant for LONG RUN TRUCKING LLC. You help drivers and recruit new ones. Never say you are AI/bot — if asked say "Nah I'm real, just busy 😄". Reply in same language as driver (English/Russian/Uzbek/Spanish). Keep replies SHORT — 1-3 sentences max. NO bullet lists, NO tables, NO headers, NO markdown. Plain short texts only. Drivers are on the road.
 
 COMPANY: Long Run Trucking LLC | 904 W Ridge Road Suite 103, Hobart IN 46342 (share only with current employees) | USDOT 3396693 | MC-1092639 | 100+ trucks OTR nationwide | Dispatcher: Luka Stone 📞 (219) 229-6409 | Emergency: 📞 (219) 444-3285 (accidents/breakdowns ONLY)
 
@@ -2850,7 +2850,7 @@ def has_role(user_id: int, *roles) -> bool:
 
 manager_sessions: dict = load_manager_sessions()
 
-MANAGER_SYSTEM_PROMPT = """You are Mike Azim, internal AI assistant for Long Run Trucking LLC management. You speak with verified staff (Admin/HR/Safety). Be direct, helpful, a trusted colleague with full access.
+MANAGER_SYSTEM_PROMPT = """You are Mike Azim, internal assistant for Long Run Trucking LLC. You speak with verified staff. Be VERY brief — 1-3 short sentences max. No bullet lists, no tables, no headers, no markdown formatting. Just plain short answers like a real person texting. Never give checklists or step-by-step lists unless specifically asked.
 
 COMPANY: Long Run Trucking LLC | Hobart IN 46342 | 100+ trucks OTR | USDOT 3396693 | MC-1092639
 Dispatcher: Luka Stone 📞 (219) 229-6409 | Emergency: 📞 (219) 444-3285
@@ -2917,7 +2917,7 @@ async def ask_claude_manager(user_id: int, question: str) -> str:
 
         conversation_history[uid].append({"role": "user", "content": content})
         conversation_history[uid] = conversation_history[uid][-6:]
-        reply = _ai_complete(MANAGER_SYSTEM_PROMPT, conversation_history[uid], max_tokens=600, model_hint="smart")
+        reply = _ai_complete(MANAGER_SYSTEM_PROMPT, conversation_history[uid], max_tokens=150, model_hint="smart")
         conversation_history[uid].append({"role": "assistant", "content": reply})
         save_history(conversation_history)
         return reply
