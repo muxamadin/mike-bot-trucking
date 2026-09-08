@@ -4081,6 +4081,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     pass
             return
 
+        # ── Auto-detect work updates ──────────────────────────────────────────
+        # If a role user types something that sounds like a status update,
+        # save it automatically — no prefix needed.
+        _is_question = text.strip().endswith("?")
+        _known_cmd = re.match(
+            r'^\s*(call|mvr|leads?|stats|numbers|logout|broadcast|teach|search|hiring|hometime|truck|update)',
+            text, re.IGNORECASE
+        )
+        _update_keywords = re.search(
+            r'\b(did|passed|failed|completed|started|arrived|left|picked up|delivered|called|hired|fired|quit|resigned|drug test|physical|dot|orientation|background|signed|approved|denied|refused|no show|late|accident|breakdown|fixed|ready|loaded|unloaded|home|dispatched|assigned|waiting|terminated|onboard|paperwork|cdl|mvr|psp|cleared|flagged|scheduled|interviewed|offered)\b',
+            text, re.IGNORECASE
+        )
+        if not _is_question and not _known_cmd and _update_keywords and len(text.strip()) > 5:
+            sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
+                await update.message.reply_text("📬 Got it — logged to team updates.", parse_mode="Markdown")
+            except Exception:
+                pass
+            return
+
         # ── Anything else — Mike answers as AI assistant ───────────────────────
         # Fall through to the AI response below (same as regular drivers)
 
