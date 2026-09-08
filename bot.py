@@ -3204,6 +3204,10 @@ async def receive_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # Ignore all group/channel messages — Mike only sends scheduled updates there
+    if update.message.chat.type in ("group", "supergroup", "channel"):
+        return
+
     user = update.effective_user
     text = update.message.text or ""
 
