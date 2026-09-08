@@ -3961,7 +3961,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             role_label = {"admin": "🔑 Admin", "hr": "👥 HR", "safety": "🛡 Safety"}[role_input]
             cmds = {
                 "admin": "• `call [name] [phone]` — recruiting call\n• `mvr [name] [CDL#]` — pull MVR\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `teach: [fact]` — teach Mike\n• `search: [topic]` — web search\n• `broadcast: [msg]` — send to all drivers\n• `hiring add [name] - [status]` — add to pipeline\n• `hiring update [name] - [status]` — update status\n• `hiring done [name]` — mark hired\n• `hiring list` — show pipeline\n• `hometime add [name] - [N] days` — track driver out\n• `hometime back [name]` — mark driver home\n• `hometime list` — show who's out",
-                "hr":    "• `call [name] [phone]` — recruiting call\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `hiring add [name] - [status]` — add to pipeline\n• `hiring update [name] - [status]` — update status\n• `hiring done [name]` — mark hired\n• `hiring list` — show pipeline\n• `hometime add [name] - [N] days` — track driver out\n• `hometime back [name]` — mark driver home\n• `hometime list` — show who's out",
+                "hr":    "• `call [name] [phone]` — recruiting call\n• `leads: [state]` — find drivers\n• `stats` / `numbers` — call stats\n• `hiring add [name] - [status]` — add to pipeline\n• `hiring update [name] - [status]` — update status\n• `hiring done [name]` — mark hired\n• `hiring list` — show pipeline\n• `hometime add [name] - [N] days` — track driver out\n• `hometime back [name]` — mark driver home\n• `hometime list` — show who's out\n• `truck add [unit] - [status] - [note]` — add truck\n• `truck ready [unit] - [date]` — mark ready\n• `truck assign [unit] - [driver]` — assign driver\n• `truck wait [unit] - [driver]` — hold for home time driver\n• `truck note [unit] - [note]` — update note\n• `truck done [unit]` — remove truck\n• `truck list` — show all trucks",
                 "safety":"• `mvr [name] [CDL#]` — pull MVR & upload to QM\n• `search: [topic]` — web search",
             }[role_input]
             await update.message.reply_text(
@@ -4104,6 +4104,120 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # ── HIRING PIPELINE commands ──────────────────────────────────────────
+        # ── TRUCK LIST commands ───────────────────────────────────────────────
+        # truck add T101 - shop - brakes need fixing
+        # truck ready T101 - Jan 15
+        # truck assign T101 - John Smith
+        # truck wait T101 - John Smith
+        # truck note T101 - new note
+        # truck done T101   (remove from list)
+        # truck list
+        truck_add = re.match(r'^\s*truck\s+add\s+(\S+)\s*[-–]\s*(\w+)(?:\s*[-–]\s*(.+))?', text, re.IGNORECASE)
+        truck_ready = re.match(r'^\s*truck\s+ready\s+(\S+)(?:\s*[-–]\s*(.+))?', text, re.IGNORECASE)
+        truck_assign = re.match(r'^\s*truck\s+assign\s+(\S+)\s*[-–]\s*(.+)', text, re.IGNORECASE)
+        truck_wait = re.match(r'^\s*truck\s+wait\s+(\S+)\s*[-–]\s*(.+)', text, re.IGNORECASE)
+        truck_note = re.match(r'^\s*truck\s+note\s+(\S+)\s*[-–]\s*(.+)', text, re.IGNORECASE)
+        truck_done = re.match(r'^\s*truck\s+done\s+(\S+)', text, re.IGNORECASE)
+        truck_list = re.match(r'^\s*truck\s+list', text, re.IGNORECASE)
+
+        if truck_add:
+            unit = truck_add.group(1).upper()
+            status = truck_add.group(2).lower()
+            notes = (truck_add.group(3) or "").strip()
+            status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+            status_label = status_map.get(status, status)
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                from datetime import date
+                _sb.table("trucks").upsert({"unit": unit, "status": status_label, "notes": notes, "arrived_date": date.today().isoformat(), "added_by": user.id}, on_conflict="unit").execute()
+                await update.message.reply_text(f"🚛 Truck *{unit}* added — {status_label}\n📝 {notes or 'No notes'}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_ready:
+            unit = truck_ready.group(1).upper()
+            ready_date = (truck_ready.group(2) or "now").strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("trucks").update({"status": "✅ ready", "ready_date": ready_date, "updated_at": "now()"}).eq("unit", unit).execute()
+                await update.message.reply_text(f"✅ Truck *{unit}* is READY — {ready_date}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_assign:
+            unit = truck_assign.group(1).upper()
+            driver = truck_assign.group(2).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("trucks").update({"status": "👤 assigned", "assigned_driver": driver, "updated_at": "now()"}).eq("unit", unit).execute()
+                await update.message.reply_text(f"👤 Truck *{unit}* assigned to *{driver}*", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_wait:
+            unit = truck_wait.group(1).upper()
+            driver = truck_wait.group(2).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("trucks").update({"status": "⏳ waiting", "assigned_driver": driver, "updated_at": "now()"}).eq("unit", unit).execute()
+                await update.message.reply_text(f"⏳ Truck *{unit}* on hold — waiting for *{driver}* (home time)", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_note:
+            unit = truck_note.group(1).upper()
+            notes = truck_note.group(2).strip()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("trucks").update({"notes": notes, "updated_at": "now()"}).eq("unit", unit).execute()
+                await update.message.reply_text(f"📝 Truck *{unit}* note updated: {notes}", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_done:
+            unit = truck_done.group(1).upper()
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                _sb.table("trucks").delete().eq("unit", unit).execute()
+                await update.message.reply_text(f"🗑️ Truck *{unit}* removed from list.", parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if truck_list:
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(SUPABASE_URL, SUPABASE_SERVICE_KEY)
+                rows = _sb.table("trucks").select("unit,status,assigned_driver,notes,ready_date,arrived_date").order("arrived_date").execute()
+                if not rows.data:
+                    await update.message.reply_text("🚛 No trucks in the list.")
+                else:
+                    lines = ["🚛 *Truck List:*\n"]
+                    for r in rows.data:
+                        line = f"*{r['unit']}* — {r['status']}"
+                        if r.get("assigned_driver"):
+                            line += f" → {r['assigned_driver']}"
+                        if r.get("ready_date"):
+                            line += f" | ready: {r['ready_date']}"
+                        if r.get("notes"):
+                            line += f"\n    📝 {r['notes']}"
+                        lines.append(line)
+                    await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+            except Exception as e:
+                await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
         # "hiring add John Smith - Applied"  or  "hiring update John Smith - Orientation"
         # "hiring list"   "hiring done John Smith"
         hiring_add = re.match(r'^\s*hiring\s+add\s+(.+?)\s*[-–]\s*(.+)', text, re.IGNORECASE)
@@ -4784,6 +4898,19 @@ async def hr_daily_update_loop(bot):
                 for row in (hp.data or []):
                     hiring_lines.append(f"  • {row['name']} — {row['status']}")
 
+                # Truck list
+                truck_lines = []
+                tr = sb_client.table("trucks").select("unit,status,assigned_driver,notes,ready_date").order("arrived_date").execute()
+                for row in (tr.data or []):
+                    tline = f"  *{row['unit']}* — {row['status']}"
+                    if row.get("assigned_driver"):
+                        tline += f" → {row['assigned_driver']}"
+                    if row.get("ready_date"):
+                        tline += f" (ready: {row['ready_date']})"
+                    if row.get("notes"):
+                        tline += f" | {row['notes']}"
+                    truck_lines.append(tline)
+
                 # Home time tracker
                 ht = sb_client.table("home_time").select("name,due_home_date").eq("status", "out").order("due_home_date").execute()
                 today = date.today()
@@ -4800,6 +4927,7 @@ async def hr_daily_update_loop(bot):
 
             hiring_section = "\n".join(hiring_lines) if hiring_lines else "  None"
             hometime_section = "\n".join(hometime_lines) if hometime_lines else "  None"
+            truck_section = "\n".join(truck_lines) if truck_lines else "  None"
 
             msg = (
                 f"📊 *Daily HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
@@ -4807,7 +4935,8 @@ async def hr_daily_update_loop(bot):
                 f"🔥 Hot leads: *{hot_leads}*\n\n"
                 f"📋 *Hiring Pipeline:*\n{hiring_section}\n\n"
                 f"🏠 *Drivers Out / Home Time:*\n{hometime_section}\n\n"
-                f"Use `hiring list` or `hometime list` for details."
+                f"🚛 *Truck Status:*\n{truck_section}\n\n"
+                f"Use `truck list` · `hiring list` · `hometime list` for details."
             )
             await bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
             logger.info(f"HR daily update sent to group {HR_GROUP_ID}")
