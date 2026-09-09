@@ -4266,6 +4266,120 @@ Set is_work_update=false if it's just casual chat like "ok", "thanks", "how are 
             await update.message.reply_text(f"📞 *Call Transcript:*\n\n{transcript}", parse_mode="Markdown")
             return
 
+        # ── Smart auto-save for managers: extract driver/truck info ──────────
+        _is_question = text.strip().endswith("?")
+        _known_mgr_cmd = re.match(
+            r'^\s*(call|mvr|leads?|stats|numbers|logout|broadcast|teach|search|hiring|hometime|truck|update|transcript)',
+            text, re.IGNORECASE
+        )
+        if not _is_question and not _known_mgr_cmd and len(text.strip()) > 5:
+            sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+            extract_prompt = f"""You are a data extractor for a trucking company dispatcher/HR team.
+
+RULES for recognizing truck units vs driver names:
+- Truck units look like: T101, T202, Unit 105, unit 42, #101, truck 5, Truck T55 — short alphanumeric codes, often starting with T or a number
+- Driver names look like: John Smith, Omar Hargrove, Carlos Mendez, Maria Lopez — first + last name (two words, both capitalized)
+- If you see "T101" or "unit 101" it's a TRUCK. If you see "John Smith" it's a DRIVER.
+- One message can have MULTIPLE trucks and/or MULTIPLE drivers — extract ALL of them.
+
+MESSAGE: "{text}"
+
+Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can have multiple items):
+{{
+  "is_work_update": true or false,
+  "trucks": [
+    {{
+      "unit": "T101",
+      "status": "shop" or "ready" or "assigned" or "waiting",
+      "notes": "brief note or null",
+      "assigned_driver": "Driver Name or null"
+    }}
+  ],
+  "drivers": [
+    {{
+      "name": "Full Name",
+      "pipeline_status": "Applied/Orientation/Drug Test/Background/Hired/Active/Fired/Quit or null",
+      "hometime_days": null or number,
+      "note": "any other info or null"
+    }}
+  ]
+}}
+
+Examples:
+- "T101 in shop, transmission issue" → trucks:[{{unit:"T101",status:"shop",notes:"transmission issue"}}]
+- "John Smith passed drug test" → drivers:[{{name:"John Smith",pipeline_status:"Drug Test"}}]
+- "Omar going home for 2 weeks" → drivers:[{{name:"Omar",hometime_days:14}}]
+- "T202 ready, assigned to Carlos Mendez" → trucks:[{{unit:"T202",status:"assigned",assigned_driver:"Carlos Mendez"}}]
+
+Set is_work_update=true if message is about company operations.
+Set is_work_update=false if it's casual chat like "ok", "thanks", "how are you"."""
+            try:
+                import json as _json
+                raw = _ai_complete("You extract structured data. Reply ONLY with valid JSON.", [{"role": "user", "content": extract_prompt}], max_tokens=400, model_hint="fast")
+                jstart = raw.find("{")
+                jend = raw.rfind("}") + 1
+                if jstart >= 0 and jend > jstart:
+                    extracted = _json.loads(raw[jstart:jend])
+                    from supabase import create_client as _sc
+                    from datetime import date as _date, timedelta as _td
+                    _sb = _sc(_SB_URL, _SB_KEY)
+                    saved = []
+                    status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+
+                    for truck in extracted.get("trucks") or []:
+                        unit = (truck.get("unit") or "").strip().upper()
+                        if not unit:
+                            continue
+                        status = (truck.get("status") or "shop").lower()
+                        status_label = status_map.get(status, status)
+                        notes_parts = []
+                        if truck.get("notes"):
+                            notes_parts.append(truck["notes"])
+                        if truck.get("assigned_driver"):
+                            notes_parts.append(f"assigned: {truck['assigned_driver']}")
+                        notes = "; ".join(notes_parts)
+                        _sb.table("trucks").upsert(
+                            {"unit": unit, "status": status_label, "notes": notes,
+                             "arrived_date": _date.today().isoformat(), "added_by": user.id},
+                            on_conflict="unit"
+                        ).execute()
+                        saved.append(f"🚛 {unit} → {status_label}")
+
+                    for drv in extracted.get("drivers") or []:
+                        name = (drv.get("name") or "").strip()
+                        if not name or len(name) < 3:
+                            continue
+                        pipeline_status = drv.get("pipeline_status")
+                        hometime_days = drv.get("hometime_days")
+                        note = drv.get("note") or ""
+                        if pipeline_status:
+                            existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
+                            if existing.data:
+                                _sb.table("hiring_pipeline").update({"status": pipeline_status, "notes": note or None}).ilike("name", name).execute()
+                            else:
+                                _sb.table("hiring_pipeline").insert({"name": name, "status": pipeline_status, "notes": note or None, "added_by": user.id}).execute()
+                            saved.append(f"📋 {name} → {pipeline_status}")
+                        if hometime_days:
+                            days = int(hometime_days)
+                            due = (_date.today() + _td(days=days)).isoformat()
+                            existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
+                            if existing.data:
+                                _sb.table("home_time").update({"weeks_out": max(1, days // 7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
+                            else:
+                                _sb.table("home_time").insert({"name": name, "weeks_out": max(1, days // 7), "due_home_date": due, "status": "out", "added_by": user.id}).execute()
+                            saved.append(f"🏠 {name} → home {days}d, back {due}")
+
+                    if extracted.get("is_work_update"):
+                        _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
+                        if not saved:
+                            saved.append("update logged")
+
+                    if saved:
+                        await update.message.reply_text("✅ Saved: " + " | ".join(saved))
+                        return
+            except Exception:
+                pass
+
         reply = await ask_claude_manager(user.id, text)
         await safe_reply(update, reply)
         return
