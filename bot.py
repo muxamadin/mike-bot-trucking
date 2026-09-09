@@ -3497,11 +3497,10 @@ Set is_work_update=true for anything about company operations. False only for pu
                         if not pipeline_status and not hometime_days and note:
                             saved.append(f"📝 {name}: {note}")
 
-                    # Always log as team update if work-related
-                    if extracted.get("is_work_update"):
+                    # Only log to team_updates if nothing was saved to specific tables
+                    if extracted.get("is_work_update") and not saved:
                         _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
-                        if not saved:
-                            saved.append("update logged")
+                        saved.append("update logged")
 
                     if saved:
                         await update.message.reply_text("✅ Saved: " + " | ".join(saved))
