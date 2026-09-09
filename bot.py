@@ -2904,7 +2904,7 @@ FLEET: Freightliner/Volvo/Mack/Peterbilt OTR. Breakdown shops: TA Truck Service,
 
 FREIGHT: Amazon, JB Hunt, FedEx, USPS — all 48 states. No loads situation: keep driver on duty status, dispatcher works it, never leave driver sitting more than 4h without update.
 
-NEVER share company address with applicants — current employees only. NEVER commit to pay changes — manager discusses directly."""
+NEVER share company address with applicants — current employees only. NEVER commit to pay changes — manager discusses directly.
 
 Answer questions directly and thoroughly. You can discuss all internal operations, driver files, pay, safety records, and company decisions. Keep responses concise but complete. If something needs manager final approval, say so.
 
@@ -3238,9 +3238,106 @@ async def receive_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     return ConversationHandler.END
 
 
+async def _extract_and_save_info(text: str, sender_name: str, sender_id: int, sb) -> list:
+    """Shared helper: run AI extraction on text and save to trucks/hiring/home_time. Returns list of saved items."""
+    import json as _json
+    from datetime import date as _date, timedelta as _td
+    status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+    ep = f"""You are a data extractor for a trucking company HR/dispatch team.
+
+TRUCK UNIT RULES — a truck unit is a SHORT CODE like: 1202, 1122, 005, T101, T55, unit 42 — pure numbers or letter+number combos that refer to vehicles.
+DRIVER NAME RULES — a driver name is TWO OR MORE WORDS that are a person's name. Names can be ALL CAPS (MARIO ROSARIO), Title Case (Mario Rosario), or mixed.
+
+HIRING PIPELINE STATUSES — map naturally:
+- "waiting drug test" / "drug test" → "Drug Test"
+- "waiting insurance" / "insurance approval" → "Insurance Approval"
+- "orientation" / "boarding" → "Orientation"
+- "background" / "background check" → "Background Check"
+- "waiting flight" / "delayed flight" → "Travel/Waiting"
+- "home time" / "coming home" / "going home" → "Home Time"
+- "assigned" / "ready to drive" → "Assigned"
+- "hired" / "started" / "onboarded" → "Hired"
+- "fired" / "terminated" / "quit" / "left" → "Terminated"
+
+MESSAGE: "{text}"
+
+Reply ONLY with valid JSON:
+{{"is_work_update":true,"trucks":[{{"unit":"1202","status":"shop|ready|assigned|waiting","notes":"or null","assigned_driver":"Name or null"}}],"drivers":[{{"name":"Full Name","pipeline_status":"Drug Test|Orientation|etc or null","hometime_days":null,"hired":false,"terminated":false}}]}}
+Use empty arrays [] if nothing found. Set hired=true if driver is confirmed hired/started. Set terminated=true if fired/quit/left."""
+    try:
+        raw = _ai_complete("Extract structured data. Reply ONLY valid JSON.", [{"role": "user", "content": ep}], max_tokens=400, model_hint="fast")
+        js = raw[raw.find("{"):raw.rfind("}")+1]
+        if not js:
+            return []
+        ex = _json.loads(js)
+        saved = []
+        for truck in ex.get("trucks") or []:
+            unit = (truck.get("unit") or "").strip().upper()
+            if not unit:
+                continue
+            st = (truck.get("status") or "shop").lower()
+            st_label = status_map.get(st, st)
+            notes_parts = []
+            if truck.get("notes"):
+                notes_parts.append(truck["notes"])
+            if truck.get("assigned_driver"):
+                notes_parts.append(f"assigned: {truck['assigned_driver']}")
+            sb.table("trucks").upsert(
+                {"unit": unit, "status": st_label, "notes": "; ".join(notes_parts),
+                 "arrived_date": _date.today().isoformat(), "added_by": sender_id},
+                on_conflict="unit"
+            ).execute()
+            saved.append(f"🚛 {unit} → {st_label}")
+        for drv in ex.get("drivers") or []:
+            name = (drv.get("name") or "").strip()
+            if not name or len(name) < 3:
+                continue
+            ps = drv.get("pipeline_status")
+            hd = drv.get("hometime_days")
+            hired = drv.get("hired", False)
+            terminated = drv.get("terminated", False)
+            if hired:
+                # Remove from hiring pipeline — they're in
+                sb.table("hiring_pipeline").delete().ilike("name", name).execute()
+                saved.append(f"✅ {name} hired — removed from pipeline")
+            elif terminated:
+                sb.table("hiring_pipeline").delete().ilike("name", name).execute()
+                sb.table("home_time").update({"status": "back"}).ilike("name", name).execute()
+                saved.append(f"🚫 {name} terminated — removed")
+            elif ps:
+                existing = sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
+                if existing.data:
+                    sb.table("hiring_pipeline").update({"status": ps}).ilike("name", name).execute()
+                else:
+                    sb.table("hiring_pipeline").insert({"name": name, "status": ps, "added_by": sender_id}).execute()
+                saved.append(f"📋 {name} → {ps}")
+            if hd:
+                days = int(hd)
+                due = (_date.today() + _td(days=days)).isoformat()
+                existing = sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
+                if existing.data:
+                    sb.table("home_time").update({"weeks_out": max(1, days//7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
+                else:
+                    sb.table("home_time").insert({"name": name, "weeks_out": max(1, days//7), "due_home_date": due, "status": "out", "added_by": sender_id}).execute()
+                saved.append(f"🏠 {name} → home {days}d")
+        return saved
+    except Exception:
+        return []
+
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Ignore all group/channel messages — Mike only sends scheduled updates there
+    # Group/supergroup messages — silently extract data, never reply
     if update.message.chat.type in ("group", "supergroup", "channel"):
+        text = update.message.text or update.message.caption or ""
+        if text and len(text.strip()) > 5:
+            try:
+                from supabase import create_client as _sc
+                _sb = _sc(_SB_URL, _SB_KEY)
+                user = update.effective_user
+                sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+                await _extract_and_save_info(text, sender_name, user.id, _sb)
+            except Exception:
+                pass
         return
 
     user = update.effective_user
@@ -3420,126 +3517,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if not _is_question and not _known_cmd and len(text.strip()) > 5:
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
-
-            extract_prompt = f"""You are a data extractor for a trucking company HR/dispatch team.
-
-TRUCK UNIT RULES — a truck unit is a SHORT CODE like: 1202, 1122, 005, T101, T55, unit 42 — pure numbers or letter+number combos that refer to vehicles.
-DRIVER NAME RULES — a driver name is TWO OR MORE WORDS that are a person's name. Names can be ALL CAPS (MARIO ROSARIO), Title Case (Mario Rosario), or mixed. Recognize them as names even in ALL CAPS.
-
-HIRING PIPELINE STATUSES — map naturally:
-- "waiting drug test" / "drug test" → "Drug Test"
-- "waiting insurance" / "insurance approval" → "Insurance Approval"
-- "orientation" / "boarding" → "Orientation"
-- "background" / "background check" → "Background Check"
-- "waiting flight" / "delayed flight" → "Travel/Waiting"
-- "home time" / "coming home" → "Home Time"
-- "assigned" / "ready to drive" → "Assigned"
-- "hired" → "Hired"
-
-MESSAGE: "{text}"
-
-Extract ALL trucks and ALL drivers mentioned. Names in ALL CAPS are still driver names — extract them.
-Reply ONLY with valid JSON:
-{{
-  "is_work_update": true or false,
-  "trucks": [
-    {{
-      "unit": "1202",
-      "status": "shop" or "ready" or "assigned" or "waiting",
-      "notes": "brief note or null",
-      "assigned_driver": "Driver Name or null"
-    }}
-  ],
-  "drivers": [
-    {{
-      "name": "Full Name",
-      "pipeline_status": "Drug Test or Orientation or Insurance Approval or Background Check or Travel/Waiting or Home Time or Assigned or Hired or null",
-      "hometime_days": null or number,
-      "note": "any other info or null"
-    }}
-  ]
-}}
-
-Examples:
-- "MARIO ROSARIO - waiting drug test, assign 2211 JOSE MORALES" → drivers:[{{name:"Mario Rosario",pipeline_status:"Drug Test"}},{{name:"Jose Morales",pipeline_status:null}}], trucks:[{{unit:"2211",status:"assigned",assigned_driver:"Jose Morales"}}]
-- "WIDNIQUE MAKANDAL home time coming Sunday" → drivers:[{{name:"Widnique Makandal",pipeline_status:"Home Time",hometime_days:3}}]
-- "MCDANIEL QUINTOIN waiting insurance approval, DUNCAN JOHNTEARIA" → drivers:[{{name:"Mcdaniel Quintoin",pipeline_status:"Insurance Approval"}},{{name:"Duncan Johntearia",pipeline_status:"Insurance Approval"}}]
-- "1122 in SC need bring to ORL" → trucks:[{{unit:"1122",status:"waiting",notes:"in SC need bring to ORL"}}]
-- "005 ready assigned driver" → trucks:[{{unit:"005",status:"assigned"}}]
-
-Set is_work_update=true for anything about company operations. False only for pure casual chat."""
-
             try:
-                import json as _json
-                raw = _ai_complete("You extract structured data. Reply ONLY with valid JSON.", [{"role": "user", "content": extract_prompt}], max_tokens=400, model_hint="fast")
-                jstart = raw.find("{")
-                jend = raw.rfind("}") + 1
-                if jstart >= 0 and jend > jstart:
-                    extracted = _json.loads(raw[jstart:jend])
-                    from supabase import create_client as _sc
-                    from datetime import date as _date, timedelta as _td
-                    _sb = _sc(_SB_URL, _SB_KEY)
-                    saved = []
-                    status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
-
-                    # Save trucks
-                    for truck in extracted.get("trucks") or []:
-                        unit = (truck.get("unit") or "").strip().upper()
-                        if not unit:
-                            continue
-                        status = (truck.get("status") or "shop").lower()
-                        status_label = status_map.get(status, status)
-                        notes_parts = []
-                        if truck.get("notes"):
-                            notes_parts.append(truck["notes"])
-                        if truck.get("assigned_driver"):
-                            notes_parts.append(f"assigned: {truck['assigned_driver']}")
-                        notes = "; ".join(notes_parts)
-                        _sb.table("trucks").upsert(
-                            {"unit": unit, "status": status_label, "notes": notes,
-                             "arrived_date": _date.today().isoformat(), "added_by": user.id},
-                            on_conflict="unit"
-                        ).execute()
-                        saved.append(f"🚛 {unit} → {status_label}")
-
-                    # Save drivers
-                    for drv in extracted.get("drivers") or []:
-                        name = (drv.get("name") or "").strip()
-                        if not name or len(name) < 3:
-                            continue
-                        pipeline_status = drv.get("pipeline_status")
-                        hometime_days = drv.get("hometime_days")
-                        note = drv.get("note") or ""
-
-                        if pipeline_status:
-                            existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
-                            if existing.data:
-                                _sb.table("hiring_pipeline").update({"status": pipeline_status, "notes": note or None}).ilike("name", name).execute()
-                            else:
-                                _sb.table("hiring_pipeline").insert({"name": name, "status": pipeline_status, "notes": note or None, "added_by": user.id}).execute()
-                            saved.append(f"📋 {name} → {pipeline_status}")
-
-                        if hometime_days:
-                            days = int(hometime_days)
-                            due = (_date.today() + _td(days=days)).isoformat()
-                            existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
-                            if existing.data:
-                                _sb.table("home_time").update({"weeks_out": max(1, days // 7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
-                            else:
-                                _sb.table("home_time").insert({"name": name, "weeks_out": max(1, days // 7), "due_home_date": due, "status": "out", "added_by": user.id}).execute()
-                            saved.append(f"🏠 {name} → home {days}d, back {due}")
-
-                        if not pipeline_status and not hometime_days and note:
-                            saved.append(f"📝 {name}: {note}")
-
-                    # Only log to team_updates if nothing was saved to specific tables
-                    if extracted.get("is_work_update") and not saved:
-                        _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
-                        saved.append("update logged")
-
-                    if saved:
-                        await update.message.reply_text("✅ Saved: " + " | ".join(saved))
-                        return
+                from supabase import create_client as _sc
+                _sb = _sc(_SB_URL, _SB_KEY)
+                saved = await _extract_and_save_info(text, sender_name, user.id, _sb)
+                if not saved:
+                    _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
+                    saved = ["update logged"]
+                if saved and saved != ["update logged"]:
+                    await update.message.reply_text("✅ Saved: " + " | ".join(saved))
+                    return
             except Exception:
                 pass
 
@@ -4403,109 +4390,16 @@ Use empty arrays [] if nothing found."""
         )
         if not _is_question and not _known_mgr_cmd and len(text.strip()) > 5:
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
-            extract_prompt = f"""You are a data extractor for a trucking company dispatcher/HR team.
-
-RULES for recognizing truck units vs driver names:
-- Truck units look like: T101, T202, Unit 105, unit 42, #101, truck 5, Truck T55 — short alphanumeric codes, often starting with T or a number
-- Driver names look like: John Smith, Omar Hargrove, Carlos Mendez, Maria Lopez — first + last name (two words, both capitalized)
-- If you see "T101" or "unit 101" it's a TRUCK. If you see "John Smith" it's a DRIVER.
-- One message can have MULTIPLE trucks and/or MULTIPLE drivers — extract ALL of them.
-
-MESSAGE: "{text}"
-
-Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can have multiple items):
-{{
-  "is_work_update": true or false,
-  "trucks": [
-    {{
-      "unit": "T101",
-      "status": "shop" or "ready" or "assigned" or "waiting",
-      "notes": "brief note or null",
-      "assigned_driver": "Driver Name or null"
-    }}
-  ],
-  "drivers": [
-    {{
-      "name": "Full Name",
-      "pipeline_status": "Applied/Orientation/Drug Test/Background/Hired/Active/Fired/Quit or null",
-      "hometime_days": null or number,
-      "note": "any other info or null"
-    }}
-  ]
-}}
-
-Examples:
-- "T101 in shop, transmission issue" → trucks:[{{unit:"T101",status:"shop",notes:"transmission issue"}}]
-- "John Smith passed drug test" → drivers:[{{name:"John Smith",pipeline_status:"Drug Test"}}]
-- "Omar going home for 2 weeks" → drivers:[{{name:"Omar",hometime_days:14}}]
-- "T202 ready, assigned to Carlos Mendez" → trucks:[{{unit:"T202",status:"assigned",assigned_driver:"Carlos Mendez"}}]
-
-Set is_work_update=true if message is about company operations.
-Set is_work_update=false if it's casual chat like "ok", "thanks", "how are you"."""
             try:
-                import json as _json
-                raw = _ai_complete("You extract structured data. Reply ONLY with valid JSON.", [{"role": "user", "content": extract_prompt}], max_tokens=400, model_hint="fast")
-                jstart = raw.find("{")
-                jend = raw.rfind("}") + 1
-                if jstart >= 0 and jend > jstart:
-                    extracted = _json.loads(raw[jstart:jend])
-                    from supabase import create_client as _sc
-                    from datetime import date as _date, timedelta as _td
-                    _sb = _sc(_SB_URL, _SB_KEY)
-                    saved = []
-                    status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
-
-                    for truck in extracted.get("trucks") or []:
-                        unit = (truck.get("unit") or "").strip().upper()
-                        if not unit:
-                            continue
-                        status = (truck.get("status") or "shop").lower()
-                        status_label = status_map.get(status, status)
-                        notes_parts = []
-                        if truck.get("notes"):
-                            notes_parts.append(truck["notes"])
-                        if truck.get("assigned_driver"):
-                            notes_parts.append(f"assigned: {truck['assigned_driver']}")
-                        notes = "; ".join(notes_parts)
-                        _sb.table("trucks").upsert(
-                            {"unit": unit, "status": status_label, "notes": notes,
-                             "arrived_date": _date.today().isoformat(), "added_by": user.id},
-                            on_conflict="unit"
-                        ).execute()
-                        saved.append(f"🚛 {unit} → {status_label}")
-
-                    for drv in extracted.get("drivers") or []:
-                        name = (drv.get("name") or "").strip()
-                        if not name or len(name) < 3:
-                            continue
-                        pipeline_status = drv.get("pipeline_status")
-                        hometime_days = drv.get("hometime_days")
-                        note = drv.get("note") or ""
-                        if pipeline_status:
-                            existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
-                            if existing.data:
-                                _sb.table("hiring_pipeline").update({"status": pipeline_status, "notes": note or None}).ilike("name", name).execute()
-                            else:
-                                _sb.table("hiring_pipeline").insert({"name": name, "status": pipeline_status, "notes": note or None, "added_by": user.id}).execute()
-                            saved.append(f"📋 {name} → {pipeline_status}")
-                        if hometime_days:
-                            days = int(hometime_days)
-                            due = (_date.today() + _td(days=days)).isoformat()
-                            existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
-                            if existing.data:
-                                _sb.table("home_time").update({"weeks_out": max(1, days // 7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
-                            else:
-                                _sb.table("home_time").insert({"name": name, "weeks_out": max(1, days // 7), "due_home_date": due, "status": "out", "added_by": user.id}).execute()
-                            saved.append(f"🏠 {name} → home {days}d, back {due}")
-
-                    if extracted.get("is_work_update"):
-                        _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
-                        if not saved:
-                            saved.append("update logged")
-
-                    if saved:
-                        await update.message.reply_text("✅ Saved: " + " | ".join(saved))
-                        return
+                from supabase import create_client as _sc
+                _sb = _sc(_SB_URL, _SB_KEY)
+                saved = await _extract_and_save_info(text, sender_name, user.id, _sb)
+                if not saved:
+                    _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
+                    saved = ["update logged"]
+                if saved and saved != ["update logged"]:
+                    await update.message.reply_text("✅ Saved: " + " | ".join(saved))
+                    return
             except Exception:
                 pass
 
@@ -4524,6 +4418,34 @@ Set is_work_update=false if it's casual chat like "ok", "thanks", "how are you".
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle photos/documents sent by known employees or manager (Google creds JSON)."""
     user = update.effective_user
+
+    # Group photo — silently read with vision, extract names/info, never reply
+    if update.message.chat.type in ("group", "supergroup", "channel"):
+        if update.message.photo:
+            try:
+                import base64, anthropic as _anthropic
+                file = await context.bot.get_file(update.message.photo[-1].file_id)
+                img_bytes = await file.download_as_bytearray()
+                b64 = base64.b64encode(img_bytes).decode()
+                caption = update.message.caption or ""
+                _ac = _anthropic.Anthropic()
+                resp = _ac.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=400,
+                    messages=[{"role": "user", "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                        {"type": "text", "text": f"Read this image. Extract any driver names, CDL numbers, truck/unit numbers, statuses. Caption: '{caption}'. Reply with plain text summary of what you see."}
+                    ]}]
+                )
+                extracted_text = resp.content[0].text.strip()
+                if extracted_text:
+                    from supabase import create_client as _sc
+                    _sb = _sc(_SB_URL, _SB_KEY)
+                    sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
+                    await _extract_and_save_info(extracted_text + (f" {caption}" if caption else ""), sender_name, user.id, _sb)
+            except Exception:
+                pass
+        return
 
     # Manager sending Google service account JSON credentials
     if user.id == OWNER_ID and update.message.document:
@@ -4555,6 +4477,45 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 await update.message.reply_text(f"❌ Failed to save credentials: {e}")
             return
+
+    # Manager/HR sends a photo — try to read names/info from it using vision
+    if user.id in manager_sessions and update.message.photo:
+        try:
+            import base64, httpx as _httpx
+            file = await context.bot.get_file(update.message.photo[-1].file_id)
+            img_bytes = await file.download_as_bytearray()
+            b64 = base64.b64encode(img_bytes).decode()
+            caption = update.message.caption or ""
+            import anthropic as _anthropic
+            _ac = _anthropic.Anthropic()
+            resp = _ac.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=600,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": b64}},
+                        {"type": "text", "text": f"""Read this image carefully. Extract any driver names, truck/unit numbers, statuses, and any work-related info visible.
+Caption: '{caption}'
+Reply ONLY with a plain text summary of what you see — names, unit numbers, statuses. If it's a list/sheet, read all rows. If it's a document, extract key fields."""}
+                    ]
+                }]
+            )
+            extracted_text = resp.content[0].text.strip()
+            if extracted_text:
+                from supabase import create_client as _sc
+                _sb = _sc(_SB_URL, _SB_KEY)
+                sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip()
+                saved = await _extract_and_save_info(extracted_text, sender_name, user.id, _sb)
+                if saved:
+                    await update.message.reply_text(f"📸 Read from image:\n{extracted_text[:300]}\n\n✅ Saved: " + " | ".join(saved))
+                else:
+                    await update.message.reply_text(f"📸 Read from image:\n{extracted_text[:400]}\n\nNo driver/truck data found to save.")
+            else:
+                await update.message.reply_text("📸 Got the image but couldn't read any text from it.")
+        except Exception as e:
+            await update.message.reply_text(f"📸 Couldn't read image: {e}")
+        return
 
     if user.id == OWNER_ID or user.id not in known_employees:
         return
