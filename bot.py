@@ -3528,6 +3528,7 @@ Set is_work_update=false if it's just casual chat like "ok", "thanks", "how are 
         # ── TEAM UPDATES ─────────────────────────────────────────────────────
         # "update T101 - oil change done"  or  "updates list"
         update_list = re.match(r'^\s*updates?\s+list', text, re.IGNORECASE)
+        update_send = re.match(r'^\s*updates?\s+send', text, re.IGNORECASE)
         update_add = re.match(r'^\s*update\s+(.+)', text, re.IGNORECASE)
 
         if update_list:
@@ -3547,6 +3548,57 @@ Set is_work_update=false if it's just casual chat like "ok", "thanks", "how are 
                     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 await update.message.reply_text(f"❌ DB error: {e}")
+            return
+
+        if update_send:
+            if not HR_GROUP_ID:
+                await update.message.reply_text("❌ HR group not configured.")
+                return
+            try:
+                from supabase import create_client as _sc
+                from datetime import date, timedelta
+                _sb = _sc(_SB_URL, _SB_KEY)
+                today_str = date.today().isoformat()
+                hiring_lines, hometime_lines, truck_lines, update_lines = [], [], [], []
+                hp = _sb.table("hiring_pipeline").select("name,status").neq("status", "Hired ✅").order("updated_at").execute()
+                for row in (hp.data or []):
+                    hiring_lines.append(f"  • {row['name']} — {row['status']}")
+                ht = _sb.table("home_time").select("name,due_home_date").eq("status", "out").order("due_home_date").execute()
+                today = date.today()
+                for row in (ht.data or []):
+                    due = row.get("due_home_date", "?")
+                    if due and due != "?":
+                        days_left = (date.fromisoformat(due) - today).days
+                        flag = "🔴" if days_left <= 0 else ("🟡" if days_left <= 3 else "🟢")
+                        hometime_lines.append(f"  {flag} {row['name']} — due {due} ({days_left}d)")
+                    else:
+                        hometime_lines.append(f"  • {row['name']}")
+                tr = _sb.table("trucks").select("unit,status,assigned_driver,notes,ready_date").order("arrived_date").execute()
+                for row in (tr.data or []):
+                    tline = f"  *{row['unit']}* — {row['status']}"
+                    if row.get("assigned_driver"):
+                        tline += f" → {row['assigned_driver']}"
+                    if row.get("ready_date"):
+                        tline += f" (ready: {row['ready_date']})"
+                    if row.get("notes"):
+                        tline += f" | {row['notes']}"
+                    truck_lines.append(tline)
+                since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+                upd = _sb.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at").execute()
+                for row in (upd.data or []):
+                    ts = row["created_at"][11:16]
+                    update_lines.append(f"  • [{ts}] {row['sender_name']}: {row['message']}")
+                msg = (
+                    f"📊 *HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
+                    f"📋 *Hiring Pipeline:*\n" + ("\n".join(hiring_lines) if hiring_lines else "  None") + "\n\n"
+                    f"🏠 *Drivers Out / Home Time:*\n" + ("\n".join(hometime_lines) if hometime_lines else "  None") + "\n\n"
+                    f"🚛 *Unit Status:*\n" + ("\n".join(truck_lines) if truck_lines else "  None") + "\n\n"
+                    f"📬 *Team Updates (24h):*\n" + ("\n".join(update_lines) if update_lines else "  No updates")
+                )
+                await context.bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
+                await update.message.reply_text("✅ Sent to HR group.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {e}")
             return
 
         if update_add and not re.match(r'^\s*update\s+(T\d+\s*[-–]|ready|assign|wait|note|done|list)', text, re.IGNORECASE):
