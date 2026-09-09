@@ -3535,6 +3535,7 @@ Set is_work_update=true for anything about company operations. False only for pu
         # "update T101 - oil change done"  or  "updates list"
         update_list = re.match(r'^\s*updates?\s+list', text, re.IGNORECASE)
         update_send = re.match(r'^\s*updates?\s+send', text, re.IGNORECASE)
+        update_process = re.match(r'^\s*updates?\s+process', text, re.IGNORECASE)
         update_add = re.match(r'^\s*update\s+(.+)', text, re.IGNORECASE)
 
         if update_list:
@@ -3603,6 +3604,93 @@ Set is_work_update=true for anything about company operations. False only for pu
                 )
                 await context.bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
                 await update.message.reply_text("✅ Sent to HR group.")
+            except Exception as e:
+                await update.message.reply_text(f"❌ Error: {e}")
+            return
+
+        if update_process:
+            await update.message.reply_text("🔄 Processing all team updates — sorting into pipeline and trucks...")
+            try:
+                import json as _json
+                from supabase import create_client as _sc
+                from datetime import date as _date, timedelta as _td
+                _sb = _sc(_SB_URL, _SB_KEY)
+                rows = _sb.table("team_updates").select("id,message,sender_name,sender_id").order("created_at").execute()
+                if not rows.data:
+                    await update.message.reply_text("No team updates to process.")
+                    return
+                status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+                total_trucks, total_drivers = 0, 0
+                for row in rows.data:
+                    msg_text = row["message"]
+                    sender_id = row.get("sender_id") or user.id
+                    ep = f"""You are a data extractor for a trucking company HR/dispatch team.
+
+TRUCK UNIT RULES — a truck unit is a SHORT CODE like: 1202, 1122, 005, T101, T55, unit 42 — pure numbers or letter+number combos that refer to vehicles.
+DRIVER NAME RULES — a driver name is TWO OR MORE WORDS that are a person's name. Names can be ALL CAPS (MARIO ROSARIO), Title Case (Mario Rosario), or mixed.
+
+HIRING PIPELINE STATUSES — map naturally:
+- "waiting drug test" / "drug test" → "Drug Test"
+- "waiting insurance" / "insurance approval" → "Insurance Approval"
+- "orientation" / "boarding" → "Orientation"
+- "background" / "background check" → "Background Check"
+- "waiting flight" / "delayed flight" → "Travel/Waiting"
+- "home time" / "coming home" → "Home Time"
+- "assigned" / "ready to drive" → "Assigned"
+- "hired" → "Hired"
+
+MESSAGE: "{msg_text}"
+
+Reply ONLY with valid JSON:
+{{"trucks":[{{"unit":"1202","status":"shop|ready|assigned|waiting","notes":"or null","assigned_driver":"Name or null"}}],"drivers":[{{"name":"Full Name","pipeline_status":"Drug Test|Orientation|etc or null","hometime_days":null}}]}}
+Use empty arrays [] if nothing found."""
+                    try:
+                        raw = _ai_complete("Extract structured data. Reply ONLY valid JSON.", [{"role": "user", "content": ep}], max_tokens=300, model_hint="fast")
+                        js = raw[raw.find("{"):raw.rfind("}")+1]
+                        if not js:
+                            continue
+                        ex = _json.loads(js)
+                        for truck in ex.get("trucks") or []:
+                            unit = (truck.get("unit") or "").strip().upper()
+                            if not unit:
+                                continue
+                            st = (truck.get("status") or "shop").lower()
+                            st_label = status_map.get(st, st)
+                            notes_parts = []
+                            if truck.get("notes"):
+                                notes_parts.append(truck["notes"])
+                            if truck.get("assigned_driver"):
+                                notes_parts.append(f"assigned: {truck['assigned_driver']}")
+                            _sb.table("trucks").upsert(
+                                {"unit": unit, "status": st_label, "notes": "; ".join(notes_parts),
+                                 "arrived_date": _date.today().isoformat(), "added_by": sender_id},
+                                on_conflict="unit"
+                            ).execute()
+                            total_trucks += 1
+                        for drv in ex.get("drivers") or []:
+                            name = (drv.get("name") or "").strip()
+                            if not name or len(name) < 3:
+                                continue
+                            ps = drv.get("pipeline_status")
+                            hd = drv.get("hometime_days")
+                            if ps:
+                                existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
+                                if existing.data:
+                                    _sb.table("hiring_pipeline").update({"status": ps}).ilike("name", name).execute()
+                                else:
+                                    _sb.table("hiring_pipeline").insert({"name": name, "status": ps, "added_by": sender_id}).execute()
+                                total_drivers += 1
+                            if hd:
+                                days = int(hd)
+                                due = (_date.today() + _td(days=days)).isoformat()
+                                existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
+                                if existing.data:
+                                    _sb.table("home_time").update({"weeks_out": max(1, days//7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
+                                else:
+                                    _sb.table("home_time").insert({"name": name, "weeks_out": max(1, days//7), "due_home_date": due, "status": "out", "added_by": sender_id}).execute()
+                    except Exception:
+                        continue
+                await update.message.reply_text(f"✅ Done! Sorted {total_drivers} drivers into pipeline, {total_trucks} trucks into unit list.")
             except Exception as e:
                 await update.message.reply_text(f"❌ Error: {e}")
             return
