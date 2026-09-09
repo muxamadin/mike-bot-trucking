@@ -3606,7 +3606,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     lines = ["📬 *Team Updates (last 24h):*\n"]
                     for r in rows.data:
                         ts = r["created_at"][:16].replace("T", " ")
-                        lines.append(f"• [{ts}] *{r['sender_name']}*: {r['message']}")
+                        lines.append(f"• {r['message']}")
                     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
             except Exception as e:
                 await update.message.reply_text(f"❌ DB error: {e}")
@@ -3649,7 +3649,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 upd = _sb.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at").execute()
                 for row in (upd.data or []):
                     ts = row["created_at"][11:16]
-                    update_lines.append(f"  • [{ts}] {row['sender_name']}: {row['message']}")
+                    update_lines.append(f"  • {row['message']}")
                 msg = (
                     f"📊 *HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
                     f"📋 *Hiring Pipeline:*\n" + ("\n".join(hiring_lines) if hiring_lines else "  None") + "\n\n"
@@ -4668,7 +4668,7 @@ async def hr_daily_update_loop(bot):
                 upd = sb_client.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at").execute()
                 for row in (upd.data or []):
                     ts = row["created_at"][11:16]
-                    update_lines.append(f"  • [{ts}] {row['sender_name']}: {row['message']}")
+                    update_lines.append(f"  • {row['message']}")
             except Exception:
                 pass
 
