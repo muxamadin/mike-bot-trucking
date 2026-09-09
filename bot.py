@@ -3385,77 +3385,116 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         if not _is_question and not _known_cmd and len(text.strip()) > 5:
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
-            # Use AI to extract structured info
-            extract_prompt = f"""You are a data extractor for a trucking company. From this message extract any info about drivers or trucks.
 
-Message: "{text}"
+            extract_prompt = f"""You are a data extractor for a trucking company dispatcher/HR team.
 
-Reply ONLY with JSON in this exact format (use null if not mentioned):
+RULES for recognizing truck units vs driver names:
+- Truck units look like: T101, T202, Unit 105, unit 42, #101, truck 5, Truck T55 — short alphanumeric codes, often starting with T or a number
+- Driver names look like: John Smith, Omar Hargrove, Carlos Mendez, Maria Lopez — first + last name (two words, both capitalized)
+- If you see "T101" or "unit 101" it's a TRUCK. If you see "John Smith" it's a DRIVER.
+- One message can have MULTIPLE trucks and/or MULTIPLE drivers — extract ALL of them.
+
+MESSAGE: "{text}"
+
+Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can have multiple items):
 {{
-  "type": "driver" | "truck" | "update" | "none",
-  "truck_unit": null or "T101",
-  "truck_status": null or "shop" or "ready" or "assigned" or "waiting",
-  "truck_notes": null or "brief note",
-  "driver_name": null or "Full Name",
-  "driver_pipeline_status": null or "Applied/Orientation/Drug Test/Background/Hired/etc",
-  "driver_hometime_days": null or number,
-  "is_work_update": true or false
+  "is_work_update": true or false,
+  "trucks": [
+    {{
+      "unit": "T101",
+      "status": "shop" or "ready" or "assigned" or "waiting",
+      "notes": "brief note or null",
+      "assigned_driver": "Driver Name or null"
+    }}
+  ],
+  "drivers": [
+    {{
+      "name": "Full Name",
+      "pipeline_status": "Applied/Orientation/Drug Test/Background/Hired/Active/Fired/Quit or null",
+      "hometime_days": null or number,
+      "note": "any other info or null"
+    }}
+  ]
 }}
 
-Only set is_work_update=true if it's clearly about company operations. Set type="none" if it's just casual chat."""
+Examples:
+- "T101 in shop, transmission issue" → trucks:[{{unit:"T101",status:"shop",notes:"transmission issue"}}]
+- "John Smith passed drug test" → drivers:[{{name:"John Smith",pipeline_status:"Drug Test"}}]
+- "Omar going home for 2 weeks" → drivers:[{{name:"Omar",hometime_days:14}}]
+- "T202 ready, assigned to Carlos Mendez" → trucks:[{{unit:"T202",status:"assigned",assigned_driver:"Carlos Mendez"}}], drivers:[{{name:"Carlos Mendez",note:"assigned to T202"}}]
+- "Alex Jones starts orientation Monday, T55 is ready for next driver" → both trucks and drivers arrays filled
+
+Set is_work_update=true if message is about company operations (trucks, drivers, loads, schedule).
+Set is_work_update=false if it's just casual chat like "ok", "thanks", "how are you"."""
 
             try:
                 import json as _json
-                raw = _ai_complete("You extract structured data.", [{"role": "user", "content": extract_prompt}], max_tokens=200, model_hint="fast")
-                # find JSON in response
+                raw = _ai_complete("You extract structured data. Reply ONLY with valid JSON.", [{"role": "user", "content": extract_prompt}], max_tokens=400, model_hint="fast")
                 jstart = raw.find("{")
                 jend = raw.rfind("}") + 1
                 if jstart >= 0 and jend > jstart:
                     extracted = _json.loads(raw[jstart:jend])
                     from supabase import create_client as _sc
+                    from datetime import date as _date, timedelta as _td
                     _sb = _sc(_SB_URL, _SB_KEY)
                     saved = []
+                    status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
 
-                    # Save truck info
-                    if extracted.get("truck_unit") and extracted.get("type") in ("truck", "update"):
-                        unit = extracted["truck_unit"].upper()
-                        status = extracted.get("truck_status") or "shop"
-                        status_map = {"shop": "🔧 shop", "ready": "✅ ready", "assigned": "👤 assigned", "waiting": "⏳ waiting"}
+                    # Save trucks
+                    for truck in extracted.get("trucks") or []:
+                        unit = (truck.get("unit") or "").strip().upper()
+                        if not unit:
+                            continue
+                        status = (truck.get("status") or "shop").lower()
                         status_label = status_map.get(status, status)
-                        notes = extracted.get("truck_notes") or ""
-                        from datetime import date as _date
-                        _sb.table("trucks").upsert({"unit": unit, "status": status_label, "notes": notes, "arrived_date": _date.today().isoformat(), "added_by": user.id}, on_conflict="unit").execute()
-                        saved.append(f"🚛 {unit} — {status_label}")
+                        notes_parts = []
+                        if truck.get("notes"):
+                            notes_parts.append(truck["notes"])
+                        if truck.get("assigned_driver"):
+                            notes_parts.append(f"assigned: {truck['assigned_driver']}")
+                        notes = "; ".join(notes_parts)
+                        _sb.table("trucks").upsert(
+                            {"unit": unit, "status": status_label, "notes": notes,
+                             "arrived_date": _date.today().isoformat(), "added_by": user.id},
+                            on_conflict="unit"
+                        ).execute()
+                        saved.append(f"🚛 {unit} → {status_label}")
 
-                    # Save driver hiring pipeline
-                    if extracted.get("driver_name") and extracted.get("driver_pipeline_status"):
-                        name = extracted["driver_name"]
-                        status = extracted["driver_pipeline_status"]
-                        existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
-                        if existing.data:
-                            _sb.table("hiring_pipeline").update({"status": status, "updated_at": "now()"}).ilike("name", name).execute()
-                        else:
-                            _sb.table("hiring_pipeline").insert({"name": name, "status": status, "added_by": user.id}).execute()
-                        saved.append(f"📋 {name} — {status}")
+                    # Save drivers
+                    for drv in extracted.get("drivers") or []:
+                        name = (drv.get("name") or "").strip()
+                        if not name or len(name) < 3:
+                            continue
+                        pipeline_status = drv.get("pipeline_status")
+                        hometime_days = drv.get("hometime_days")
+                        note = drv.get("note") or ""
 
-                    # Save home time
-                    if extracted.get("driver_name") and extracted.get("driver_hometime_days"):
-                        name = extracted["driver_name"]
-                        days = int(extracted["driver_hometime_days"])
-                        from datetime import date as _date, timedelta as _td
-                        due = (_date.today() + _td(days=days)).isoformat()
-                        existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
-                        if existing.data:
-                            _sb.table("home_time").update({"weeks_out": days // 7, "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
-                        else:
-                            _sb.table("home_time").insert({"name": name, "weeks_out": days // 7, "due_home_date": due, "status": "out", "added_by": user.id}).execute()
-                        saved.append(f"🏠 {name} — out {days} days, due {due}")
+                        if pipeline_status:
+                            existing = _sb.table("hiring_pipeline").select("id").ilike("name", name).execute()
+                            if existing.data:
+                                _sb.table("hiring_pipeline").update({"status": pipeline_status, "notes": note or None}).ilike("name", name).execute()
+                            else:
+                                _sb.table("hiring_pipeline").insert({"name": name, "status": pipeline_status, "notes": note or None, "added_by": user.id}).execute()
+                            saved.append(f"📋 {name} → {pipeline_status}")
 
-                    # Always save as team update if work-related
-                    if extracted.get("is_work_update") and extracted.get("type") != "none":
+                        if hometime_days:
+                            days = int(hometime_days)
+                            due = (_date.today() + _td(days=days)).isoformat()
+                            existing = _sb.table("home_time").select("id").ilike("name", name).eq("status", "out").execute()
+                            if existing.data:
+                                _sb.table("home_time").update({"weeks_out": max(1, days // 7), "due_home_date": due}).ilike("name", name).eq("status", "out").execute()
+                            else:
+                                _sb.table("home_time").insert({"name": name, "weeks_out": max(1, days // 7), "due_home_date": due, "status": "out", "added_by": user.id}).execute()
+                            saved.append(f"🏠 {name} → home {days}d, back {due}")
+
+                        if not pipeline_status and not hometime_days and note:
+                            saved.append(f"📝 {name}: {note}")
+
+                    # Always log as team update if work-related
+                    if extracted.get("is_work_update"):
                         _sb.table("team_updates").insert({"message": text.strip(), "sender_name": sender_name, "sender_id": user.id}).execute()
                         if not saved:
-                            saved.append("logged")
+                            saved.append("update logged")
 
                     if saved:
                         await update.message.reply_text("✅ Saved: " + " | ".join(saved))
