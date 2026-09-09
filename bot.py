@@ -3645,17 +3645,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if row.get("notes"):
                         tline += f" | {row['notes']}"
                     truck_lines.append(tline)
-                since = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-                upd = _sb.table("team_updates").select("message,sender_name,created_at").gte("created_at", since).order("created_at").execute()
-                for row in (upd.data or []):
-                    ts = row["created_at"][11:16]
-                    update_lines.append(f"  • {row['message']}")
                 msg = (
                     f"📊 *HR Update — {datetime.now(timezone.utc).strftime('%B %d, %Y')}*\n\n"
                     f"📋 *Hiring Pipeline:*\n" + ("\n".join(hiring_lines) if hiring_lines else "  None") + "\n\n"
                     f"🏠 *Drivers Out / Home Time:*\n" + ("\n".join(hometime_lines) if hometime_lines else "  None") + "\n\n"
-                    f"🚛 *Unit Status:*\n" + ("\n".join(truck_lines) if truck_lines else "  None") + "\n\n"
-                    f"📬 *Team Updates (24h):*\n" + ("\n".join(update_lines) if update_lines else "  No updates")
+                    f"🚛 *Unit Status:*\n" + ("\n".join(truck_lines) if truck_lines else "  None")
                 )
                 await context.bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
                 await update.message.reply_text("✅ Sent to HR group.")
@@ -4683,8 +4677,7 @@ async def hr_daily_update_loop(bot):
                 f"🔥 Hot leads: *{hot_leads}*\n\n"
                 f"📋 *Hiring Pipeline:*\n{hiring_section}\n\n"
                 f"🏠 *Drivers Out / Home Time:*\n{hometime_section}\n\n"
-                f"🚛 *Unit Status:*\n{truck_section}\n\n"
-                f"📬 *Team Updates (24h):*\n{updates_section}"
+                f"🚛 *Unit Status:*\n{truck_section}"
             )
             await bot.send_message(HR_GROUP_ID, msg, parse_mode="Markdown")
             logger.info(f"HR daily update sent to group {HR_GROUP_ID}")
