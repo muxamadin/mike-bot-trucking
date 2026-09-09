@@ -3386,22 +3386,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not _is_question and not _known_cmd and len(text.strip()) > 5:
             sender_name = f"{user.first_name or ''} {user.last_name or ''}".strip() or f"User {user.id}"
 
-            extract_prompt = f"""You are a data extractor for a trucking company dispatcher/HR team.
+            extract_prompt = f"""You are a data extractor for a trucking company HR/dispatch team.
 
-RULES for recognizing truck units vs driver names:
-- Truck units look like: T101, T202, Unit 105, unit 42, #101, truck 5, Truck T55 — short alphanumeric codes, often starting with T or a number
-- Driver names look like: John Smith, Omar Hargrove, Carlos Mendez, Maria Lopez — first + last name (two words, both capitalized)
-- If you see "T101" or "unit 101" it's a TRUCK. If you see "John Smith" it's a DRIVER.
-- One message can have MULTIPLE trucks and/or MULTIPLE drivers — extract ALL of them.
+TRUCK UNIT RULES — a truck unit is a SHORT CODE like: 1202, 1122, 005, T101, T55, unit 42 — pure numbers or letter+number combos that refer to vehicles.
+DRIVER NAME RULES — a driver name is TWO OR MORE WORDS that are a person's name. Names can be ALL CAPS (MARIO ROSARIO), Title Case (Mario Rosario), or mixed. Recognize them as names even in ALL CAPS.
+
+HIRING PIPELINE STATUSES — map naturally:
+- "waiting drug test" / "drug test" → "Drug Test"
+- "waiting insurance" / "insurance approval" → "Insurance Approval"
+- "orientation" / "boarding" → "Orientation"
+- "background" / "background check" → "Background Check"
+- "waiting flight" / "delayed flight" → "Travel/Waiting"
+- "home time" / "coming home" → "Home Time"
+- "assigned" / "ready to drive" → "Assigned"
+- "hired" → "Hired"
 
 MESSAGE: "{text}"
 
-Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can have multiple items):
+Extract ALL trucks and ALL drivers mentioned. Names in ALL CAPS are still driver names — extract them.
+Reply ONLY with valid JSON:
 {{
   "is_work_update": true or false,
   "trucks": [
     {{
-      "unit": "T101",
+      "unit": "1202",
       "status": "shop" or "ready" or "assigned" or "waiting",
       "notes": "brief note or null",
       "assigned_driver": "Driver Name or null"
@@ -3410,7 +3418,7 @@ Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can 
   "drivers": [
     {{
       "name": "Full Name",
-      "pipeline_status": "Applied/Orientation/Drug Test/Background/Hired/Active/Fired/Quit or null",
+      "pipeline_status": "Drug Test or Orientation or Insurance Approval or Background Check or Travel/Waiting or Home Time or Assigned or Hired or null",
       "hometime_days": null or number,
       "note": "any other info or null"
     }}
@@ -3418,14 +3426,13 @@ Extract ALL trucks and drivers mentioned. Reply ONLY with this JSON (arrays can 
 }}
 
 Examples:
-- "T101 in shop, transmission issue" → trucks:[{{unit:"T101",status:"shop",notes:"transmission issue"}}]
-- "John Smith passed drug test" → drivers:[{{name:"John Smith",pipeline_status:"Drug Test"}}]
-- "Omar going home for 2 weeks" → drivers:[{{name:"Omar",hometime_days:14}}]
-- "T202 ready, assigned to Carlos Mendez" → trucks:[{{unit:"T202",status:"assigned",assigned_driver:"Carlos Mendez"}}], drivers:[{{name:"Carlos Mendez",note:"assigned to T202"}}]
-- "Alex Jones starts orientation Monday, T55 is ready for next driver" → both trucks and drivers arrays filled
+- "MARIO ROSARIO - waiting drug test, assign 2211 JOSE MORALES" → drivers:[{{name:"Mario Rosario",pipeline_status:"Drug Test"}},{{name:"Jose Morales",pipeline_status:null}}], trucks:[{{unit:"2211",status:"assigned",assigned_driver:"Jose Morales"}}]
+- "WIDNIQUE MAKANDAL home time coming Sunday" → drivers:[{{name:"Widnique Makandal",pipeline_status:"Home Time",hometime_days:3}}]
+- "MCDANIEL QUINTOIN waiting insurance approval, DUNCAN JOHNTEARIA" → drivers:[{{name:"Mcdaniel Quintoin",pipeline_status:"Insurance Approval"}},{{name:"Duncan Johntearia",pipeline_status:"Insurance Approval"}}]
+- "1122 in SC need bring to ORL" → trucks:[{{unit:"1122",status:"waiting",notes:"in SC need bring to ORL"}}]
+- "005 ready assigned driver" → trucks:[{{unit:"005",status:"assigned"}}]
 
-Set is_work_update=true if message is about company operations (trucks, drivers, loads, schedule).
-Set is_work_update=false if it's just casual chat like "ok", "thanks", "how are you"."""
+Set is_work_update=true for anything about company operations. False only for pure casual chat."""
 
             try:
                 import json as _json
